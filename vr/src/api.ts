@@ -215,6 +215,25 @@ export function getBridgeHealth(): Promise<BridgeHealth> {
   return json("/bridge/health");
 }
 
+export interface FullHealth {
+  web: { ok: boolean; detail: string };
+  agent: { ok: boolean; url: string; detail?: string | null };
+  data: {
+    ok: boolean;
+    structure: string | null;
+    triad: string;
+    state_writable: boolean;
+    candidates: number;
+    decisions: number;
+  };
+  checked_ms: number;
+}
+
+/** Viewer → gate → agent lab, and the data the gate stands on, in one call. */
+export function getFullHealth(): Promise<FullHealth> {
+  return json("/health/full");
+}
+
 /** Name a candidate. Not a decision, and not written to the audit trail. */
 export function setLabel(candidate_id: string, label: string) {
   return json<{ ok: boolean; label: string | null }>(

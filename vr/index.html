@@ -37,6 +37,14 @@
       #status { color: #0e1d29; }
       #status[data-state="error"] { color: #8e1a2b; }
 
+      #health { margin: 6px 0 8px; font-size: 11px; color: #3a5569; }
+      #health .link::before {
+        content: ""; display: inline-block; width: 8px; height: 8px; margin-right: 6px;
+        border-radius: 50%; background: #9aa9b6; vertical-align: 0;
+      }
+      #health .link[data-state="ok"]::before { background: #1f8a4c; }
+      #health .link[data-state="down"]::before { background: #b3263a; }
+
       #enter-xr {
         position: fixed; bottom: 24px; right: 24px; z-index: 10;
         padding: 14px 28px; font: inherit; font-size: 15px; letter-spacing: 0.04em;
@@ -51,6 +59,7 @@
     <div id="hud">
       <h1>PETase Lab — Approval Gate</h1>
       <p id="status">booting…</p>
+      <div id="health"></div>
       <p id="queue-line"></p>
       <p>
         Hands: pinch a <b>white bar</b> = move that surface · pinch anything else =

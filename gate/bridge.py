@@ -296,11 +296,11 @@ def send_decision(approval_id: str, decision: str) -> dict:
         return {"status": "unreachable", "detail": str(exc)}
 
 
-def health() -> dict:
+def health(timeout: float = 15) -> dict:
     import httpx
 
     try:
-        response = httpx.get(f"{BRIDGE_URL}/health", headers=auth_headers(), timeout=15)
+        response = httpx.get(f"{BRIDGE_URL}/health", headers=auth_headers(), timeout=timeout)
         return {"reachable": response.status_code == 200, **response.json()}
     except Exception as exc:  # noqa: BLE001
         return {"reachable": False, "detail": str(exc)}

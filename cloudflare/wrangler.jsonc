@@ -1,6 +1,7 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "petase-lab",
+  // The Worker that already holds the OPENAI_API_KEY secret.
+  "name": "hackglobal",
   "main": "src/index.ts",
   "compatibility_date": "2026-10-04",
   "observability": { "enabled": true },

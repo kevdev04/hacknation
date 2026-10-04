@@ -57,6 +57,7 @@ import {
   type DecisionKind,
   type BridgeHealth,
   type BridgeRun,
+  type FullHealth,
   type GateConfig,
   type VariantPayload,
 } from "./api";
@@ -88,6 +89,7 @@ import { epistasisPairs, residueMetrics, type EpistasisPair } from "./metrics";
 import { loadScan, type Scan } from "./scan";
 import { mutateResidue } from "./rotamer";
 import { VoiceInput, voiceHealth } from "./voice";
+import { startHealthHud } from "./healthHud";
 import { XRInput } from "./input";
 import { THEME, disposeGroup, makeGrabBar, type CanvasPanel } from "./ui";
 
@@ -389,6 +391,15 @@ function links(): Link[] {
         : `${bridgeHealth?.bridge_url ?? "unknown"} — start it or set BRIDGE_URL`,
     },
     {
+      name: "Gate data",
+      state: fullHealth ? (fullHealth.data.ok ? "ok" : "down") : "unknown",
+      detail: fullHealth?.data.ok
+        ? `${fullHealth.data.structure} triad ${fullHealth.data.triad} · audit trail writable`
+        : fullHealth
+          ? "structure or state directory unavailable on the gate"
+          : "not checked yet",
+    },
+    {
       name: "Structure",
       state: currentStructure ? "ok" : "down",
       detail: currentStructure
@@ -411,6 +422,15 @@ function links(): Link[] {
     },
   ];
 }
+
+/** Last /health/full, shared by the desktop HUD lights and the in-world links. */
+let fullHealth: FullHealth | null = null;
+startHealthHud((next) => {
+  if (next && fullHealth && next.data.ok !== fullHealth.data.ok) {
+    log(next.data.ok ? "gate data ok" : "gate data unavailable", next.data.ok ? "info" : "error");
+  }
+  fullHealth = next;
+});
 
 function fullyConnected(): boolean {
   return links().every((l) => l.state === "ok");
