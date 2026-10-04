@@ -3,3 +3,6 @@ uvicorn[standard]
 httpx
 python-multipart
 python-dotenv
+
+# auth_headers(): renueva el token OAuth solo; sin esto solo queda BRIDGE_TOKEN fijo
+databricks-sdk>=0.146.0
