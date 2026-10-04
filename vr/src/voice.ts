@@ -42,6 +42,8 @@ export class VoiceInput {
   /** Last thing the gate heard, shown in-world so a misheard question is visible. */
   lastText = "";
   lastError: string | null = null;
+  /** True while a transcript is being handed to the agent lab. */
+  dispatching = false;
 
   private stream: MediaStream | null = null;
   private recorder: MediaRecorder | null = null;
@@ -89,10 +91,10 @@ export class VoiceInput {
   }
 
   /**
-   * Stop recording and send the clip. Resolves with what the gate heard, or
-   * null when there was nothing to send.
+   * Stop recording and upload the clip for transcription. Resolves with what
+   * the gate heard, or null when there was nothing worth sending.
    */
-  async stopAndSend(mode: "live" | "mock" = "mock"): Promise<VoiceResult | null> {
+  async stopAndSend(): Promise<VoiceResult | null> {
     const recorder = this.recorder;
     if (!recorder || this.state !== "recording") return null;
 
@@ -118,7 +120,8 @@ export class VoiceInput {
     try {
       const form = new FormData();
       form.append("audio", blob, "speech.webm");
-      form.append("mode", mode);
+      // Transcribe only: the reviewer sees the text and presses Send to lab.
+      form.append("explore", "false");
       const response = await fetch("/voice/ask", { method: "POST", body: form });
       if (!response.ok) {
         const detail = await response.text();

@@ -40,6 +40,7 @@ import {
 } from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import {
+  explore,
   getBridgeHealth,
   getBridgeRuns,
   getConfig,
@@ -400,9 +401,32 @@ async function beginVoice(): Promise<void> {
 
 async function endVoice(): Promise<void> {
   if (voice.state !== "recording") return;
-  const result = await voice.stopAndSend("mock");
-  if (result?.ok) log(`asked the lab: "${result.text}"`.slice(0, 70));
+  const result = await voice.stopAndSend();
+  if (result?.ok) log(`heard: "${result.text}"`.slice(0, 70));
   else if (voice.lastError) log(`voice: ${voice.lastError}`, "warn");
+}
+
+/**
+ * Hand the transcript to the agent lab. Separate from recording so a misheard
+ * question can be discarded instead of silently becoming the next query.
+ */
+async function sendTranscript(): Promise<void> {
+  const query = voice.lastText.trim();
+  if (!query || voice.dispatching) return;
+  voice.dispatching = true;
+  repaint();
+  try {
+    const { query_id } = await explore(query, "mock");
+    log(`sent to lab: "${query}" → ${query_id}`.slice(0, 70));
+    voice.lastText = "";
+    voice.lastError = null;
+  } catch (error) {
+    voice.lastError = `could not reach the lab: ${(error as Error).message}`;
+    log(`send failed: ${(error as Error).message}`, "error");
+  } finally {
+    voice.dispatching = false;
+    repaint();
+  }
 }
 
 const bench = new Bench();
@@ -503,6 +527,7 @@ function repaint(): void {
       available: voiceAvailable && voice.supported,
       lastText: voice.lastText,
       lastError: voice.lastError,
+      sending: voice.dispatching,
     },
   });
 
@@ -933,9 +958,14 @@ function handleAction(id: string): void {
       closeCard();
       return;
     case "voice":
-      // Click to start, click again to send — a canvas button has no hold.
-      if (voice.state === "recording") void endVoice();
-      else void beginVoice();
+      if (value === "send") {
+        void sendTranscript();
+      } else if (voice.state === "recording") {
+        // Click to start, click again to stop — a canvas button has no hold.
+        void endVoice();
+      } else {
+        void beginVoice();
+      }
       return;
     case "act":
       if (value === "clear") {

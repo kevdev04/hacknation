@@ -23,6 +23,23 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
+# Secrets come from a .env the gate reads at import, before anything looks at
+# os.environ. It lives at the repo root or beside this file — never under vr/,
+# because Vite reads .env from its own root and will happily bake a
+# VITE_-prefixed value into the client bundle.
+def _load_env() -> None:
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        return
+    here = Path(__file__).parent
+    for candidate in (here.parent / ".env", here / ".env"):
+        if candidate.exists():
+            load_dotenv(candidate, override=False)
+
+
+_load_env()
+
 BASE = Path(__file__).parent
 DATA = BASE / "data"
 STATE = BASE / "state"
