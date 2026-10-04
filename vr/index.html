@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
+    <title>PETase Lab — VR Approval Gate</title>
+    <style>
+      :root { color-scheme: light; }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; height: 100%; overflow: hidden; background: #cfdae5; }
+      body { font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; color: #12222e; }
+      canvas { display: block; }
+
+      /* Only visible with ?passthrough=1 — a stand-in for a busy real room. */
+      body.passthrough {
+        background:
+          repeating-linear-gradient(115deg, #1b3a8f 0 90px, #214aa8 90px 180px),
+          #1b3a8f;
+      }
+
+      #hud {
+        position: fixed; top: 12px; left: 12px; z-index: 10;
+        max-width: 340px; padding: 12px 14px;
+        background: linear-gradient(160deg,
+          rgba(238, 244, 250, 0.70), rgba(186, 200, 215, 0.54));
+        border: 1px solid rgba(40, 66, 90, 0.40);
+        box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.55);
+        border-radius: 14px;
+        backdrop-filter: blur(10px) saturate(1.15);
+      }
+      #hud h1 { margin: 0 0 6px; font-size: 13px; letter-spacing: 0.06em; text-transform: uppercase; color: #06707f; }
+      #hud p { margin: 4px 0; font-size: 12px; color: #3a5569; }
+      #hud kbd {
+        padding: 1px 5px; border: 1px solid rgba(40, 66, 90, 0.35); border-radius: 4px;
+        background: rgba(255, 255, 255, 0.45); font-size: 11px; color: #0e1d29;
+      }
+      #status { color: #0e1d29; }
+      #status[data-state="error"] { color: #8e1a2b; }
+
+      #enter-xr {
+        position: fixed; bottom: 24px; right: 24px; z-index: 10;
+        padding: 14px 28px; font: inherit; font-size: 15px; letter-spacing: 0.04em;
+        color: #f3f9fc; background: #06707f; border: 0; border-radius: 999px;
+        box-shadow: 0 6px 20px rgba(6, 112, 127, 0.30);
+        cursor: pointer;
+      }
+      #enter-xr:disabled { background: rgba(200, 213, 226, 0.6); color: #718699; cursor: default; box-shadow: none; }
+    </style>
+  </head>
+  <body>
+    <div id="hud">
+      <h1>PETase Lab — Approval Gate</h1>
+      <p id="status">booting…</p>
+      <p id="queue-line"></p>
+      <p>
+        Hands: pinch a <b>white bar</b> = move that surface · pinch anything else =
+        pick / press · <b>⟳ RECENTER WORKSPACE</b> on the top bar re-places everything
+      </p>
+      <p>
+        Controllers: trigger = same as pinch · grip = pick up anything you point at ·
+        stick = scale what you hold · stick click = recenter ·
+        <b>left Y = hold to ask</b><br />
+        <kbd>A</kbd> approve · <kbd>B</kbd> reject · <kbd>X</kbd> defer
+      </p>
+      <p>
+        Desktop: drag a <b>handle bar</b> = move that surface · drag background = orbit ·
+        scroll = zoom · click = pick / press<br />
+        <kbd>1</kbd>/<kbd>2</kbd>/<kbd>3</kbd> decide · <kbd>b</kbd> load into bench ·
+        <kbd>p</kbd> propose · <kbd>r</kbd> reset layout · <kbd>v</kbd> hold to ask ·
+        <kbd>esc</kbd> close card
+      </p>
+      <p>
+        Pick a residue → substitutions appear on the bench card below the protein →
+        chips stack on the right. The additive total is an estimate; close pairs are
+        flagged.
+      </p>
+    </div>
+    <button id="enter-xr" disabled>checking XR…</button>
+    <script>
+      if (new URLSearchParams(location.search).get("passthrough") === "1")
+        document.body.classList.add("passthrough");
+    </script>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

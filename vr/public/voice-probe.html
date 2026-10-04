@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Voice capability probe</title>
+    <style>
+      body {
+        margin: 0; padding: 24px; background: #0e1d29; color: #eaf2f8;
+        font: 20px/1.5 ui-monospace, Menlo, monospace;
+      }
+      h1 { font-size: 22px; color: #6fd8c4; margin: 0 0 16px; }
+      .row { display: flex; gap: 12px; align-items: baseline; margin: 6px 0; }
+      .k { min-width: 300px; color: #9ab3c6; }
+      .yes { color: #4ade80; font-weight: 700; }
+      .no { color: #ff7a6b; font-weight: 700; }
+      button {
+        margin-top: 18px; padding: 16px 28px; font: inherit; font-size: 22px;
+        background: #0d8277; color: #fff; border: 0; border-radius: 10px;
+      }
+      #out {
+        margin-top: 16px; padding: 14px; background: #16293a; border-radius: 10px;
+        min-height: 90px; white-space: pre-wrap; font-size: 19px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Voice capability probe</h1>
+    <div id="caps"></div>
+    <button id="go">Start listening</button>
+    <div id="out">—</div>
+
+    <script>
+      const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+      const caps = {
+        "secure context": window.isSecureContext,
+        "SpeechRecognition": !!SR,
+        "  (prefixed only)": !window.SpeechRecognition && !!window.webkitSpeechRecognition,
+        "SpeechGrammarList": !!(window.SpeechGrammarList || window.webkitSpeechGrammarList),
+        "speechSynthesis (TTS)": !!window.speechSynthesis,
+        "mediaDevices.getUserMedia": !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia),
+        "MediaRecorder": typeof MediaRecorder !== "undefined",
+        "  opus/webm supported": typeof MediaRecorder !== "undefined" &&
+          MediaRecorder.isTypeSupported("audio/webm;codecs=opus"),
+        "navigator.xr": !!navigator.xr,
+      };
+      document.getElementById("caps").innerHTML = Object.entries(caps)
+        .map(([k, v]) =>
+          `<div class="row"><span class="k">${k}</span><span class="${v ? "yes" : "no"}">${v ? "YES" : "NO"}</span></div>`)
+        .join("");
+
+      const out = document.getElementById("out");
+      document.getElementById("go").onclick = async () => {
+        if (!SR) {
+          // No Web Speech API: fall back to proving the mic itself is reachable,
+          // which is what a record-and-upload design would need.
+          out.textContent = "No SpeechRecognition. Testing getUserMedia instead…";
+          try {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            const track = stream.getAudioTracks()[0];
+            out.textContent = "getUserMedia OK\ntrack: " + track.label +
+              "\nsettings: " + JSON.stringify(track.getSettings());
+            track.stop();
+          } catch (e) {
+            out.textContent = "getUserMedia FAILED\n" + e.name + ": " + e.message;
+          }
+          return;
+        }
+        try {
+          const r = new SR();
+          r.lang = "en-US";
+          r.interimResults = true;
+          r.continuous = false;
+          out.textContent = "listening…";
+          r.onresult = (e) => {
+            let text = "";
+            for (const res of e.results) text += res[0].transcript;
+            out.textContent = "HEARD: " + text +
+              "\nfinal: " + e.results[e.results.length - 1].isFinal;
+          };
+          r.onerror = (e) => { out.textContent = "ERROR: " + e.error + " " + (e.message || ""); };
+          r.onend = () => { out.textContent += "\n(ended)"; };
+          r.start();
+        } catch (e) {
+          out.textContent = "start() threw\n" + e.name + ": " + e.message;
+        }
+      };
+    </script>
+  </body>
+</html>
