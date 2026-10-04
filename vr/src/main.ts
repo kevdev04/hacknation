@@ -68,6 +68,7 @@ import {
   findDisulfides,
   recolorCartoon,
   schemeColors,
+  setAssembly,
   termini,
   closestAtomPair,
   parsePDB,
@@ -85,9 +86,9 @@ import {
   type ProjectLink,
   type ProjectTab,
   type QuestionStatus,
-  type SessionQuestion,
 } from "./projectPanel";
 import { ConsolePanel } from "./console";
+import { History } from "./history";
 import { AnswerPanel } from "./answerPanel";
 import {
   defaultRepresentation,
@@ -101,6 +102,7 @@ import { mutateResidue } from "./rotamer";
 import { VoiceInput, voiceHealth } from "./voice";
 import { startHealthHud } from "./healthHud";
 import { XRInput } from "./input";
+import { Motion } from "./motion";
 import { disposeGroup, makeGrabBar, type CanvasPanel } from "./ui";
 
 const PROTEIN_ANCHOR = new Vector3(0, 1.38, -0.8);
@@ -203,6 +205,9 @@ proteinGroup.add(pickMarker.group);
 
 /** The molecule's own handle, rebuilt per structure because it is sized in Å. */
 let proteinHandle: Group | null = null;
+
+/** The turntable and the assembly. Idle motion, and the way a result lands. */
+const motion = new Motion();
 
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.target.copy(PROTEIN_ANCHOR);
@@ -308,6 +313,7 @@ function resetLayout(): void {
 
 function applyScale(target: Object3D, factor: number): void {
   if (target === proteinGroup) {
+    motion.touch();
     const radius = currentStructure?.radius ?? 20;
     const min = (TARGET_RADIUS_M * 0.3) / radius;
     const max = (TARGET_RADIUS_M * 4) / radius;
@@ -424,7 +430,12 @@ function fullyConnected(): boolean {
 
 let projectTab: ProjectTab = "questions";
 let projectScroll = 0;
-const questions: SessionQuestion[] = [];
+/**
+ * The project tree. Every question is a node under the answer it was asked
+ * from, so a follow-up and a fork are structurally different things rather
+ * than two entries that happen to be adjacent in a list.
+ */
+const history = new History();
 let experiments: SavedExperimentRecord[] = [];
 /** Newest unfinished exploration from the agent lab, if any. */
 let activeRun: BridgeRun | null = null;
@@ -460,20 +471,28 @@ function currentAnswer(): AnswerEntry | null {
   return answers[answerIndex] ?? null;
 }
 
-/** Show an answer and rebuild the molecule from it. */
+/**
+ * Show an answer and rebuild the molecule from it.
+ *
+ * Checking out an answer moves HEAD to the node that produced it, so the next
+ * question hangs off what is actually on screen. Stepping onto one of the
+ * built-in examples owns no node and leaves HEAD where it was.
+ */
 function selectAnswer(index: number): void {
   if (index < 0 || index >= answers.length) return;
   answerIndex = index;
   answerDeep = false;
   answerScroll = 0;
+
+  const owner = history.all().find((n) => n.answer === index);
+  if (owner) history.checkout(owner.id);
+
   applyResultView(currentAnswer()?.result ?? null);
 }
 
-function markQuestion(query_id: string, patch: Partial<SessionQuestion>): void {
-  const q = questions.find((item) => item.query_id === query_id);
-  if (!q) return;
-  Object.assign(q, patch);
-  for (const other of questions) other.current = other === q;
+/** Tie an answer to the node that asked for it. */
+function markQuestion(query_id: string, patch: Parameters<History["update"]>[1]): void {
+  history.update(query_id, patch);
 }
 
 // ---------------------------------------------------------------- voice
@@ -517,11 +536,14 @@ async function sendQuestion(): Promise<void> {
     const mode = bridgeHealth?.reachable ? "live" : "mock";
     const { query_id } = await explore(buildAgentPrompt(query), mode);
 
-    for (const q of questions) q.current = false;
-    questions.push({ query_id, query, status: "running", at: now(), current: true });
-    if (questions.length > 40) questions.shift();
+    const forked = history.isPinned ? history.branch : null;
+    history.add({ id: query_id, query, status: "running", at: now() });
 
-    log(`asked the lab (${mode}): "${query}" → ${query_id}`.slice(0, 76));
+    log(
+      forked
+        ? `forked ${forked}: "${query}" → ${query_id}`.slice(0, 76)
+        : `asked the lab (${mode}): "${query}" → ${query_id}`.slice(0, 76),
+    );
     voice.lastText = "";
     voice.lastError = null;
     projectTab = "questions";
@@ -545,7 +567,8 @@ function repaint(): void {
     tab: projectTab,
     scroll: projectScroll,
     reviewer,
-    questions,
+    graph: history.layout(),
+    branchFrom: history.isPinned ? history.branch : null,
     experiments,
     log: logEntries,
     links: links(),
@@ -573,8 +596,9 @@ function repaint(): void {
     error: voice.lastError,
     sending: voice.dispatching,
     busyStage: activeRun ? activeRun.stage : null,
-    asked: questions.length,
+    asked: history.size,
     picked: pickedLabel(),
+    branchFrom: history.isPinned ? history.branch : null,
     contextChars: promptSize(voice.lastText).context,
   });
 
@@ -583,13 +607,13 @@ function repaint(): void {
       ? `${activeRun.stage} · ${activeRun.message || activeRun.query}`.slice(0, 64)
       : (answer?.result?.headline ?? "ask the console what to look at").slice(0, 64),
     reviewer,
-    asked: questions.length,
+    asked: history.size,
     saved: experiments.length,
     progress: activeRun ? activeRun.progress : null,
     connected: fullyConnected(),
   });
 
-  queueEl.textContent = `${questions.length} asked · ${experiments.length} saved · ${queue.length} flagged for review`;
+  queueEl.textContent = `${history.size} asked · ${experiments.length} saved · ${queue.length} flagged for review`;
 }
 
 // ---------------------------------------------------------------- structure
@@ -633,6 +657,9 @@ async function mountStructure(url: string, chain: string): Promise<Structure> {
   proteinGroup.add(handle);
   proteinHandle = handle;
 
+  // The protein builds itself on the way in rather than appearing whole.
+  motion.assemble();
+
   if (new URLSearchParams(location.search).get("rotamertest") === "1") {
     void import("./rotamerTest").then((m) => m.runRotamerTest(structure));
   }
@@ -675,6 +702,9 @@ const ROLE_COLOR: Record<string, number> = {
 };
 
 function applyResultView(result: AgentResult | null): void {
+  // The fold re-threads itself for the new answer instead of cutting to it.
+  motion.assemble();
+
   if (resultOverlay) {
     proteinGroup.remove(resultOverlay);
     disposeGroup(resultOverlay);
@@ -844,17 +874,21 @@ async function saveCurrentAnswer(): Promise<void> {
     return;
   }
 
+  const owner = history.all().find((n) => n.answer === answerIndex);
+
   try {
     const saved = await saveExperiment({
-      query: result.query ?? "",
-      query_id: result.query_id ?? null,
+      query: result.query ?? owner?.query ?? "",
+      query_id: result.query_id ?? owner?.id ?? null,
+      parent_id: owner?.parent ?? null,
       headline: result.headline,
       kind: result.kind,
       result: result as unknown as Record<string, unknown>,
     });
     experiments = [saved, ...experiments.filter((e) => e.experiment_id !== saved.experiment_id)];
+    // The node wears the experiment id like a tag on a commit.
+    if (owner) history.update(owner.id, { saved: saved.experiment_id });
     log(`saved ${saved.experiment_id}: ${result.headline}`.slice(0, 76));
-    projectTab = "experiments";
     projectScroll = 0;
   } catch (error) {
     log(`save failed: ${(error as Error).message}`, "error");
@@ -890,6 +924,15 @@ async function refreshExperiments(): Promise<void> {
   } catch {
     // The project record is not worth failing a poll over.
   }
+}
+
+/** Rebuild the project tree from what the gate kept. */
+function restoreHistory(): void {
+  history.restore(experiments, (record) => {
+    const stored = (record as SavedExperimentRecord).result as AgentResult | undefined;
+    if (!stored) return undefined;
+    return answers.push({ result: stored, prose: "", problem: null }) - 1;
+  });
 }
 
 async function removeExperiment(experiment_id: string): Promise<void> {
@@ -967,16 +1010,16 @@ function ingestRun(run: BridgeRun): void {
     };
   }
 
-  answers.push(entry);
-  selectAnswer(answers.length - 1);
-
+  const index = answers.push(entry) - 1;
   markQuestion(run.query_id, {
     status,
     headline: entry.result?.headline,
     kind: entry.result?.kind,
     latency_ms: run.latency_ms,
     verdict: run.validation?.verdict ?? null,
+    answer: index,
   });
+  selectAnswer(index);
 
   log(
     `answer for ${run.query_id}: ${entry.problem ? `no view (${entry.problem})` : entry.result?.kind}`.slice(0, 76),
@@ -1129,10 +1172,24 @@ function handleAction(id: string): void {
         void saveCurrentAnswer();
         return;
       } else if (value === "open") {
-        // Jump to the answer this question produced, if it has one.
-        const found = answers.findIndex((a) => a.result?.query_id === rest);
-        if (found >= 0) selectAnswer(found);
-        else log("that question has no answer yet", "warn");
+        // Check this node out: its answer on the right, its molecule rebuilt.
+        const node = history.get(rest);
+        if (node?.answer != null) {
+          selectAnswer(node.answer);
+        } else if (node) {
+          history.checkout(node.id);
+          log(`${node.id} has no answer yet — it is still running`, "warn");
+        }
+      } else if (value === "fork") {
+        // Pin the next question to this node. Pressing it again lets go.
+        const already = history.isPinned && history.branch === rest;
+        history.pin(already ? null : rest);
+        const node = history.get(rest);
+        log(
+          already
+            ? "fork cancelled — the next question continues from here"
+            : `next question forks from ${rest}: "${node?.query ?? ""}"`.slice(0, 76),
+        );
       } else if (value === "load") {
         // First press reopens it; a second press on an already-open experiment
         // is a delete, which still needs confirming.
@@ -1308,6 +1365,7 @@ renderer.domElement.addEventListener(
       moved: false,
     };
     if (overSurface) controls.enabled = false;
+    if (object === proteinGroup) motion.touch();
     if (!object) return;
 
     // Drag in the plane facing the camera through the object's own position,
@@ -1449,11 +1507,36 @@ void (async () => {
 
 const clock = new Clock();
 
+const backboneOf = (): Group | undefined =>
+  proteinGroup.children.find((c) => c.name === "backbone") as Group | undefined;
+
+/** Last assembly progress pushed to the GPU, so the final frame is not missed. */
+let appliedAssembly = 1;
+
 renderer.setAnimationLoop(() => {
   const delta = Math.min(clock.getDelta(), 0.1);
 
   input.update(renderer.xr.getSession(), delta);
   if (!renderer.xr.isPresenting) controls.update();
+
+  // A hand on the molecule — in either world — stops the turntable dead.
+  if (input.isHeld(proteinGroup) || pointerDrag?.object === proteinGroup) motion.hold();
+
+  const yaw = motion.update(delta);
+  if (yaw !== 0) proteinGroup.rotateY(yaw);
+
+  const progress = motion.assemblyProgress;
+  if (progress !== appliedAssembly) {
+    appliedAssembly = progress;
+    const backbone = backboneOf();
+    if (backbone) setAssembly(backbone, progress);
+    // Whatever the answer drew arrives with the fold rather than before it.
+    if (resultOverlay) {
+      const e = progress * progress * (3 - 2 * progress);
+      resultOverlay.scale.setScalar(1.85 + (1 - 1.85) * e);
+      resultOverlay.visible = progress > 0.12;
+    }
+  }
 
   if (pendingRecenterFrames > 0 && renderer.xr.isPresenting) {
     pendingRecenterFrames--;
@@ -1495,7 +1578,10 @@ void (async () => {
   }
 
   await refreshExperiments();
-  log(`${experiments.length} saved experiment${experiments.length === 1 ? "" : "s"} on the gate`);
+  restoreHistory();
+  log(
+    `${experiments.length} saved experiment${experiments.length === 1 ? "" : "s"} on the gate`,
+  );
   repaint();
 
   await poll();

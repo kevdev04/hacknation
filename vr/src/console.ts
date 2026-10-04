@@ -35,6 +35,9 @@ export interface ConsoleState {
   asked: number;
   /** The residue the controller last pointed at, e.g. "SER 160". */
   picked: string | null;
+  /** Set when the next question will fork an earlier answer rather than
+   * continue from the one on screen. */
+  branchFrom: string | null;
   /** Characters of format contract travelling with the question. */
   contextChars: number;
 }
@@ -152,9 +155,15 @@ export class ConsolePanel extends CanvasPanel {
     // The question does not travel alone, and the reviewer should know that.
     ctx.fillStyle = THEME.faint;
     ctx.font = font(600, 19);
-    const footer = state.transcript
-      ? `sends your question plus ${state.contextChars} characters of format contract`
-      : `${state.asked} question${state.asked === 1 ? "" : "s"} this session`;
+    // Where the answer will hang in the project tree. Pressing Send with a
+    // fork pinned is a different act from continuing, and should look it.
+    const footer = state.branchFrom
+      ? `forking from ${state.branchFrom} — this becomes a new branch`
+      : state.transcript
+        ? `sends your question plus ${state.contextChars} characters of format contract`
+        : `${state.asked} question${state.asked === 1 ? "" : "s"} this session`;
+    ctx.fillStyle = state.branchFrom ? THEME.accent : THEME.faint;
+    ctx.font = font(state.branchFrom ? 700 : 600, 19);
     ctx.fillText(footer, PAD, H - 34);
 
     // Picking a residue is a way of pointing at what you are about to ask

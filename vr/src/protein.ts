@@ -481,6 +481,49 @@ export function buildCartoon(structure: Structure, samplesPerResidue = 8): Group
     flatShading: false,
   });
 
+  /**
+   * The assembly animation runs on the GPU.
+   *
+   * Every vertex knows where it sits along the chain (`aOrder`, 0 at the N
+   * terminus) and where its own slice of spine is (`aCenter`). From those two
+   * the vertex shader can place it on an expanded, twisted shell and ease it
+   * home, so the chain threads itself into the fold N→C. Nothing is rebuilt and
+   * nothing is allocated per frame — the whole animation is one uniform.
+   */
+  const assembly = { value: 1 };
+  material.onBeforeCompile = (shader) => {
+    shader.uniforms.uAssembly = assembly;
+    shader.vertexShader = shader.vertexShader
+      .replace(
+        "#include <common>",
+        `#include <common>
+        uniform float uAssembly;
+        attribute float aOrder;
+        attribute vec3 aCenter;`,
+      )
+      .replace(
+        "#include <begin_vertex>",
+        `#include <begin_vertex>
+        if (uAssembly < 1.0) {
+          // Each residue waits its turn: SPREAD of the run is stagger, the
+          // rest is the time any one residue takes to arrive.
+          const float SPREAD = 0.55;
+          float t = clamp((uAssembly - aOrder * SPREAD) / (1.0 - SPREAD), 0.0, 1.0);
+          float e = t * t * (3.0 - 2.0 * t);
+
+          vec3 spine = aCenter * 1.85;
+          float a = (1.0 - e) * 1.1;
+          float cs = cos(a), sn = sin(a);
+          spine = vec3(spine.x * cs - spine.z * sn, spine.y, spine.x * sn + spine.z * cs);
+
+          // Thin while it travels, full thickness once it lands.
+          vec3 scattered = spine + (position - aCenter) * 0.15;
+          transformed = mix(scattered, transformed, e);
+        }`,
+      );
+  };
+  group.userData.assembly = assembly;
+
   const ss = assignSecondary(structure);
   const ordered = [...structure.residues.values()]
     .filter((r) => r.ca)
@@ -527,6 +570,8 @@ export function buildCartoon(structure: Structure, samplesPerResidue = 8): Group
     const colors: number[] = [];
     const indices: number[] = [];
     const vertexResidue: number[] = [];
+    const vertexOrder: number[] = [];
+    const vertexCenter: number[] = [];
 
     const color = new Color();
     const up = new Vector3();
@@ -583,6 +628,9 @@ export function buildCartoon(structure: Structure, samplesPerResidue = 8): Group
         color.setHSL(0.6 - 0.27 * along, 0.55, type === "C" ? 0.46 : 0.42);
         colors.push(color.r, color.g, color.b);
         vertexResidue.push(frames[mix < 0.5 ? i0 : i1].resSeq);
+        // Where this vertex comes home from, and when its turn is.
+        vertexOrder.push(along);
+        vertexCenter.push(point.x, point.y, point.z);
       }
 
       if (s > 0) {
@@ -600,6 +648,8 @@ export function buildCartoon(structure: Structure, samplesPerResidue = 8): Group
     geometry.setAttribute("normal", new BufferAttribute(new Float32Array(normals), 3));
     const colorAttr = new BufferAttribute(new Float32Array(colors), 3);
     geometry.setAttribute("color", colorAttr);
+    geometry.setAttribute("aOrder", new BufferAttribute(new Float32Array(vertexOrder), 1));
+    geometry.setAttribute("aCenter", new BufferAttribute(new Float32Array(vertexCenter), 3));
     geometry.setIndex(indices);
 
     // Repainting the ribbon is an attribute write, never a rebuild — the
@@ -626,6 +676,17 @@ export function buildCartoon(structure: Structure, samplesPerResidue = 8): Group
  * Geometry is untouched — only the colour attribute is written — so this is
  * safe to call on every interaction.
  */
+/**
+ * Drive the assembly animation. 0 is fully scattered, 1 is the built fold.
+ *
+ * One uniform shared by every segment mesh, so this costs a single write per
+ * frame however many chains are on screen.
+ */
+export function setAssembly(backbone: Group, progress: number): void {
+  const uniform = backbone.userData.assembly as { value: number } | undefined;
+  if (uniform) uniform.value = progress;
+}
+
 export function recolorCartoon(backbone: Group, overrides: Map<number, Color>): void {
   backbone.traverse((child) => {
     const mesh = child as Mesh;

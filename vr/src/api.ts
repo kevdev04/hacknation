@@ -243,6 +243,8 @@ export interface SavedExperimentRecord {
   experiment_id: string;
   query: string;
   query_id?: string | null;
+  /** The question this one was asked from — the project tree's edge. */
+  parent_id?: string | null;
   headline: string;
   kind: string;
   /** The whole AgentResult, so a saved experiment can be rebuilt in 3D. */
@@ -264,19 +266,25 @@ export function getExperiments(): Promise<{
   return json("/experiments");
 }
 
-export function saveExperiment(payload: {
+export async function saveExperiment(payload: {
   query: string;
   query_id?: string | null;
+  parent_id?: string | null;
   headline: string;
   kind: string;
   result?: unknown;
   note?: string | null;
 }): Promise<SavedExperimentRecord> {
-  return json("/experiments", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ ...payload, saved_by: REVIEWER }),
-  });
+  // The gate answers {ok, experiment}; the caller wants the record itself.
+  const body = await json<{ ok: boolean; experiment: SavedExperimentRecord }>(
+    "/experiments",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ...payload, saved_by: REVIEWER }),
+    },
+  );
+  return body.experiment;
 }
 
 export function deleteExperiment(experiment_id: string): Promise<{ ok: boolean }> {

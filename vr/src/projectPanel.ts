@@ -12,6 +12,7 @@
  */
 
 import { CanvasPanel, THEME, font } from "./ui";
+import type { Graph, NodeStatus } from "./history";
 
 const W = 1060;
 const H = 1080;
@@ -23,27 +24,12 @@ const FOOTER_TOP = H - 132;
 export type ProjectTab = "questions" | "experiments" | "log";
 
 export const PROJECT_TABS: { id: ProjectTab; label: string }[] = [
-  { id: "questions", label: "Questions" },
+  { id: "questions", label: "History" },
   { id: "experiments", label: "Saved" },
   { id: "log", label: "Log" },
 ];
 
-export type QuestionStatus = "running" | "answered" | "failed" | "empty";
-
-export interface SessionQuestion {
-  query_id: string;
-  query: string;
-  status: QuestionStatus;
-  /** Set once an answer has been read. */
-  headline?: string;
-  kind?: string;
-  latency_ms?: number;
-  verdict?: string | null;
-  /** Seconds since the session started. */
-  at: number;
-  /** True when this is the question whose answer is on screen. */
-  current?: boolean;
-}
+export type QuestionStatus = NodeStatus;
 
 export interface SavedExperiment {
   experiment_id: string;
@@ -69,7 +55,10 @@ export interface ProjectPanelState {
   tab: ProjectTab;
   scroll: number;
   reviewer: string;
-  questions: SessionQuestion[];
+  /** The question tree, already laid out in lanes. */
+  graph: Graph;
+  /** Set while the next question is pinned to fork an earlier answer. */
+  branchFrom: string | null;
   experiments: SavedExperiment[];
   log: LogLine[];
   links: ProjectLink[];
@@ -121,7 +110,7 @@ export class ProjectPanel extends CanvasPanel {
     ctx.fillStyle = THEME.faint;
     ctx.font = font(600, 20);
     ctx.fillText(
-      `${state.reviewer} · ${state.questions.length} asked · ${state.experiments.length} saved`,
+      `${state.reviewer} · ${state.graph.rows.length} node${state.graph.rows.length === 1 ? "" : "s"} · ${state.experiments.length} saved`,
       PAD,
       y + 4,
     );
@@ -143,7 +132,7 @@ export class ProjectPanel extends CanvasPanel {
     ctx.translate(0, -scroll);
 
     let end: number;
-    if (state.tab === "questions") end = this.questionsBody(state, drawTop);
+    if (state.tab === "questions") end = this.graphBody(state, drawTop);
     else if (state.tab === "experiments") end = this.experimentsBody(state, drawTop);
     else end = this.logBody(state, drawTop);
 
@@ -193,69 +182,147 @@ export class ProjectPanel extends CanvasPanel {
 
   // ------------------------------------------------------------- bodies
 
-  private questionsBody(state: ProjectPanelState, y: number): number {
+  /**
+   * The question tree, drawn as a commit graph.
+   *
+   * The gutter on the left carries the lanes: a dot per question, a line down
+   * to the answer it was asked from, and a curve where the chain forked. The
+   * row itself is the question. Tapping it checks that answer out; the ⑂ on the
+   * right pins the next question to fork from there.
+   */
+  private graphBody(state: ProjectPanelState, y: number): number {
     const ctx = this.ctx;
-    const width = W - PAD * 2;
+    const { rows, lanes } = state.graph;
 
-    if (state.questions.length === 0) {
+    if (rows.length === 0) {
       ctx.fillStyle = THEME.faint;
       ctx.font = font(600, 22);
       return this.wrap(
-        "Nothing asked yet. Use the console below the molecule to ask the lab something.",
+        "Nothing asked yet. Ask the lab something on the console below the molecule, and the question becomes the first node of the project.",
         PAD,
         y + 8,
-        width,
+        W - PAD * 2,
         30,
       );
     }
 
-    // Newest first: the thing just asked is the thing being looked at.
-    for (const q of [...state.questions].reverse()) {
-      const top = y - 24;
-      const rowH = 86;
+    const gutter = PAD + 10;
+    const laneGap = 26;
+    const graphW = (lanes - 1) * laneGap;
+    const textX = gutter + graphW + 34;
+    const width = W - PAD - textX;
+    const rowH = 104;
 
-      if (q.current) {
+    const dotX = (lane: number) => gutter + lane * laneGap;
+    const dotY = (row: number) => y + row * rowH + 16;
+
+    // Edges first, so a dot always sits on top of the line it owns.
+    ctx.lineWidth = 3;
+    for (const r of rows) {
+      if (r.parentRow == null || r.parentLane == null) continue;
+      const x0 = dotX(r.lane);
+      const y0 = dotY(r.row);
+      const x1 = dotX(r.parentLane);
+      const y1 = dotY(r.parentRow);
+
+      ctx.strokeStyle = r.lane === r.parentLane ? THEME.rule : THEME.accent;
+      ctx.beginPath();
+      ctx.moveTo(x0, y0);
+      if (x0 === x1) {
+        ctx.lineTo(x1, y1);
+      } else {
+        // A fork: leave the parent sideways, then run straight down its lane.
+        const bend = Math.min(y1 - y0 - 10, 34);
+        ctx.lineTo(x0, y1 - bend);
+        ctx.bezierCurveTo(x0, y1 - bend / 2, x1, y1 - bend / 2, x1, y1);
+      }
+      ctx.stroke();
+    }
+
+    for (const r of rows) {
+      const node = r.node;
+      const top = dotY(r.row) - 28;
+
+      if (r.isHead) {
         ctx.fillStyle = THEME.tintAccent;
-        this.roundRect(PAD - 10, top, width + 20, rowH, 10);
+        this.roundRect(textX - 16, top, W - PAD - textX + 16, rowH - 14, 10);
         ctx.fill();
       }
+      if (r.isBranch) {
+        ctx.strokeStyle = THEME.accent;
+        ctx.lineWidth = 3;
+        this.roundRect(textX - 16, top, W - PAD - textX + 16, rowH - 14, 10);
+        ctx.stroke();
+      }
 
-      const status = STATUS[q.status];
-      ctx.fillStyle = status.dot;
+      // The node itself: filled when it has an answer, hollow while it runs.
+      const status = STATUS[node.status];
+      const cx = dotX(r.lane);
+      const cy = dotY(r.row);
       ctx.beginPath();
-      ctx.arc(PAD + 6, y - 6, 7, 0, Math.PI * 2);
-      ctx.fill();
+      ctx.arc(cx, cy, r.isHead ? 9 : 7, 0, Math.PI * 2);
+      if (node.status === "running") {
+        ctx.fillStyle = THEME.glass;
+        ctx.fill();
+        ctx.strokeStyle = status.dot;
+        ctx.lineWidth = 3;
+        ctx.stroke();
+      } else {
+        ctx.fillStyle = status.dot;
+        ctx.fill();
+      }
+      // A kept answer wears a ring, the way a tag marks a commit.
+      if (node.saved) {
+        ctx.strokeStyle = THEME.bench;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(cx, cy, 13, 0, Math.PI * 2);
+        ctx.stroke();
+      }
 
+      let ty = cy + 2;
       ctx.fillStyle = THEME.text;
-      ctx.font = font(600, 22);
-      const line = this.clipText(q.query, width - 40);
-      ctx.fillText(line, PAD + 26, y);
-      y += 28;
+      ctx.font = font(r.isHead ? 700 : 600, 22);
+      ctx.fillText(this.clipText(node.query, width - 54), textX, ty);
+      ty += 27;
 
       ctx.fillStyle = THEME.faint;
       ctx.font = font(600, 18);
-      const meta = [
-        status.word,
-        q.kind,
-        q.latency_ms ? `${(q.latency_ms / 1000).toFixed(1)} s` : null,
-        q.verdict,
-        `${q.at.toFixed(0)}s`,
-      ]
-        .filter(Boolean)
-        .join(" · ");
-      ctx.fillText(meta, PAD + 26, y);
-      y += 24;
+      ctx.fillText(
+        [
+          status.word,
+          node.kind,
+          node.latency_ms ? `${(node.latency_ms / 1000).toFixed(1)} s` : null,
+          node.verdict,
+          node.saved,
+          node.restored ? "restored" : `${node.at.toFixed(0)}s`,
+        ]
+          .filter(Boolean)
+          .join(" · "),
+        textX,
+        ty,
+      );
+      ty += 23;
 
-      if (q.headline) {
+      if (node.headline) {
         ctx.fillStyle = THEME.dim;
         ctx.font = font(600, 19);
-        y = this.wrap(q.headline, PAD + 26, y, width - 26, 24, 1);
+        this.wrap(this.clipText(node.headline, width - 54), textX, ty, width - 54, 24, 1);
       }
 
-      this.region(`project:open:${q.query_id}`, PAD - 10, top, width + 20, rowH);
-      y += 22;
+      // Fork from here. Lit while this is where the next question will attach.
+      const forkX = W - PAD - 38;
+      ctx.fillStyle = r.isBranch ? THEME.accent : THEME.off;
+      ctx.font = font(700, 26);
+      ctx.textAlign = "center";
+      ctx.fillText("⑂", forkX + 14, cy + 10);
+      ctx.textAlign = "left";
+      this.region(`project:fork:${node.id}`, forkX - 10, top, 62, rowH - 14);
+
+      this.region(`project:open:${node.id}`, textX - 16, top, forkX - textX, rowH - 14);
     }
-    return y;
+
+    return y + rows.length * rowH + 10;
   }
 
   private experimentsBody(state: ProjectPanelState, y: number): number {
@@ -380,9 +447,21 @@ export class ProjectPanel extends CanvasPanel {
       { fontSize: 22 },
     );
 
-    ctx.fillStyle = THEME.off;
-    ctx.font = font(600, 18);
-    ctx.fillText("saved experiments persist on the gate", PAD, H - 26);
+    // What the next question will attach to. Silent while it just follows the
+    // answer on screen, loud when the reviewer has pinned a fork.
+    if (state.branchFrom) {
+      ctx.fillStyle = THEME.accent;
+      ctx.font = font(700, 18);
+      ctx.fillText(
+        `next question forks from ${state.branchFrom} — ⑂ again to cancel`,
+        PAD,
+        H - 26,
+      );
+    } else {
+      ctx.fillStyle = THEME.off;
+      ctx.font = font(600, 18);
+      ctx.fillText("tap a node to reopen it · ⑂ to fork the next question", PAD, H - 26);
+    }
   }
 
   private clipText(text: string, maxWidth: number): string {

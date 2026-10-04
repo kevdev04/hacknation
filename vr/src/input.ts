@@ -303,6 +303,11 @@ export class XRInput {
     state.heldBy = null;
   }
 
+  /** Is this object in someone's hand right now? */
+  isHeld(object: Object3D): boolean {
+    return this.held.has(object);
+  }
+
   /** Drop everything — used before the layout is rebuilt under the user. */
   releaseAll(): void {
     for (const state of this.controllers) this.releaseAny(state);

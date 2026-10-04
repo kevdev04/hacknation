@@ -451,6 +451,9 @@ class Experiment(BaseModel):
     experiment_id: str = ""
     query: str
     query_id: str | None = None
+    # The question this one was asked from, so the project tree survives a
+    # restart instead of flattening into a list.
+    parent_id: str | None = None
     headline: str = ""
     kind: str = ""
     # The whole AgentResult, so an experiment can be reopened and rebuilt in 3D
