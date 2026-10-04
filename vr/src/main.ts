@@ -101,6 +101,7 @@ import { ControlBar } from "./controlBar";
 import { mutateResidue } from "./rotamer";
 import { VoiceInput, voiceHealth } from "./voice";
 import { startHealthHud } from "./healthHud";
+import { startLabPanel } from "./labPanel";
 import { XRInput } from "./input";
 import { Motion } from "./motion";
 import { disposeGroup, makeGrabBar, type CanvasPanel } from "./ui";
@@ -408,6 +409,7 @@ function links(): ProjectLink[] {
 
 /** Last /health/full, shared by the desktop HUD lights and the in-world links. */
 let fullHealth: FullHealth | null = null;
+startLabPanel((text, level) => log(text, level));
 startHealthHud((next) => {
   if (next && fullHealth && next.data.ok !== fullHealth.data.ok) {
     log(next.data.ok ? "gate data ok" : "gate data unavailable", next.data.ok ? "info" : "error");
@@ -533,8 +535,10 @@ async function sendQuestion(): Promise<void> {
   voice.dispatching = true;
   repaint();
   try {
-    const mode = bridgeHealth?.reachable ? "live" : "mock";
-    const { query_id } = await explore(buildAgentPrompt(query), mode);
+    // No mode from here: the gate decides with LAB_MODE, live by default.
+    // The viewer picking "mock" was why the glasses never reached the
+    // orchestrator even with the bridge up.
+    const { query_id } = await explore(buildAgentPrompt(query));
 
     const forked = history.isPinned ? history.branch : null;
     history.add({ id: query_id, query, status: "running", at: now() });
@@ -542,7 +546,7 @@ async function sendQuestion(): Promise<void> {
     log(
       forked
         ? `forked ${forked}: "${query}" → ${query_id}`.slice(0, 76)
-        : `asked the lab (${mode}): "${query}" → ${query_id}`.slice(0, 76),
+        : `asked the lab: "${query}" → ${query_id}`.slice(0, 76),
     );
     voice.lastText = "";
     voice.lastError = null;

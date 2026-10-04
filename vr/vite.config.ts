@@ -19,6 +19,7 @@ const paths = [
   "/proposals",
   "/bridge",
   "/voice",
+  "/lab",
 ];
 const proxy = Object.fromEntries(
   paths.map((path) => [path, { target: GATE, changeOrigin: true }]),
