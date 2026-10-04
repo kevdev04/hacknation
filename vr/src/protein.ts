@@ -653,3 +653,74 @@ export function recolorCartoon(backbone: Group, overrides: Map<number, Color>): 
     attr.needsUpdate = true;
   });
 }
+
+/** Textbook cartoon colours: cyan helix, red strand, magenta loop. */
+export const SS_COLOR: Record<SS, number> = {
+  H: 0x1aa7c0,
+  E: 0xc0392b,
+  C: 0xa0399c,
+};
+
+/**
+ * Disulfide bonds, measured from the structure: cysteine SG pairs within
+ * bonding distance. Never declared by the caller — a disulfide either is or is
+ * not there, and the file is the authority.
+ */
+export function findDisulfides(
+  structure: Structure,
+  maxDistance = 2.5,
+): { a: number; b: number; distance: number; posA: Vector3; posB: Vector3 }[] {
+  const sg: { resSeq: number; pos: Vector3 }[] = [];
+  for (const res of structure.residues.values()) {
+    if (res.resName !== "CYS") continue;
+    const atom = res.atoms.find((a) => a.name === "SG");
+    if (atom) sg.push({ resSeq: res.resSeq, pos: atom.pos });
+  }
+  const out: { a: number; b: number; distance: number; posA: Vector3; posB: Vector3 }[] = [];
+  for (let i = 0; i < sg.length; i++) {
+    for (let j = i + 1; j < sg.length; j++) {
+      const d = sg[i].pos.distanceTo(sg[j].pos);
+      if (d <= maxDistance) {
+        out.push({
+          a: sg[i].resSeq,
+          b: sg[j].resSeq,
+          distance: d,
+          posA: sg[i].pos,
+          posB: sg[j].pos,
+        });
+      }
+    }
+  }
+  return out;
+}
+
+/** First and last residue with a CA, for labelling the termini. */
+export function termini(structure: Structure): { n: Residue; c: Residue } | null {
+  const ordered = [...structure.residues.values()]
+    .filter((r) => r.ca)
+    .sort((a, b) => a.resSeq - b.resSeq);
+  if (ordered.length < 2) return null;
+  return { n: ordered[0], c: ordered[ordered.length - 1] };
+}
+
+/**
+ * Per-residue colours for a scheme, to be handed to `recolorCartoon`. An empty
+ * map means "leave the ribbon as built", which is the gradient.
+ */
+export function schemeColors(
+  structure: Structure,
+  scheme: "gradient" | "secondary_structure" | "uniform",
+): Map<number, Color> {
+  const out = new Map<number, Color>();
+  if (scheme === "gradient") return out;
+
+  if (scheme === "uniform") {
+    const muted = new Color(0x93a7bb);
+    for (const res of structure.residues.values()) out.set(res.resSeq, muted);
+    return out;
+  }
+
+  const ss = assignSecondary(structure);
+  for (const [resSeq, type] of ss) out.set(resSeq, new Color(SS_COLOR[type]));
+  return out;
+}

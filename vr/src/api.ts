@@ -179,6 +179,7 @@ export interface BridgeRun {
   progress: number;
   message: string;
   answer: { headline: string; conclusion?: string } | null;
+  citations?: { doc_id: string; title: string; year?: number | null; snippet?: string }[];
   validation: Validation | null;
   latency_ms: number;
   next_question: string;
@@ -213,6 +214,52 @@ export interface BridgeHealth {
 /** Is the agent lab bridge actually answering, and at which URL. */
 export function getBridgeHealth(): Promise<BridgeHealth> {
   return json("/bridge/health");
+}
+
+// --------------------------------------------------------------- experiments
+
+export interface SavedExperimentRecord {
+  experiment_id: string;
+  query: string;
+  query_id?: string | null;
+  headline: string;
+  kind: string;
+  /** The whole AgentResult, so a saved experiment can be rebuilt in 3D. */
+  result?: Record<string, unknown> | null;
+  note?: string | null;
+  saved_by: string;
+  saved_at?: string | null;
+}
+
+/**
+ * The project record. Kept on the gate rather than in the page so it survives a
+ * reload, a headset sleep and a restart — the session is long and the headset
+ * drops the tab more often than anyone would like.
+ */
+export function getExperiments(): Promise<{
+  count: number;
+  experiments: SavedExperimentRecord[];
+}> {
+  return json("/experiments");
+}
+
+export function saveExperiment(payload: {
+  query: string;
+  query_id?: string | null;
+  headline: string;
+  kind: string;
+  result?: unknown;
+  note?: string | null;
+}): Promise<SavedExperimentRecord> {
+  return json("/experiments", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ ...payload, saved_by: REVIEWER }),
+  });
+}
+
+export function deleteExperiment(experiment_id: string): Promise<{ ok: boolean }> {
+  return json(`/experiments/${encodeURIComponent(experiment_id)}`, { method: "DELETE" });
 }
 
 /** Name a candidate. Not a decision, and not written to the audit trail. */

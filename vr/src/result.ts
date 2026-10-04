@@ -86,9 +86,51 @@ export interface MutationSpec {
   tier?: Tier;
 }
 
+/**
+ * The base model the whole protein is drawn as.
+ *
+ * Pick it from what the answer is *about*, not from what looks impressive:
+ *
+ *   cartoon   the fold — helices, strands, loops. The default, and right for
+ *             almost every question about where something sits in the structure
+ *   surface   shape and pockets — use when the answer is about a cleft, a
+ *             binding site, accessibility or burial. Hides the interior, so a
+ *             side chain inside it cannot be seen
+ *   backbone  a plain trace. Quieter than cartoon when many residues are
+ *             highlighted at once and the ribbon would compete with them
+ *   hidden    no protein. For an answer with nothing structural to say
+ */
+export type BaseModel = "cartoon" | "surface" | "backbone" | "hidden";
+
+/**
+ * How the base is coloured where no highlight overrides it.
+ *
+ *   gradient             N-terminus to C-terminus. Shows chain direction
+ *   secondary_structure  helix / strand / loop, as a textbook figure
+ *   uniform              one muted colour, so highlights carry all the meaning
+ */
+export type ColorScheme = "gradient" | "secondary_structure" | "uniform";
+
+export interface Representation {
+  base: BaseModel;
+  color: ColorScheme;
+  /**
+   * Draw disulfide bonds as sticks. Detected from the structure (SG-SG under
+   * 2.5 Å), never declared by the backend — in 5XJH these are Cys203-Cys239
+   * and Cys273-Cys289.
+   */
+  disulfides?: boolean;
+  /** Label the N and C termini. */
+  termini?: boolean;
+  /** 0-1, only when `base` is "surface". Below ~0.6 the interior stays visible. */
+  surface_opacity?: number;
+}
+
 export interface ResultView {
   protein_id: string;
   chain: string;
+  /** Omit to accept the default for this result's `kind`. */
+  representation?: Representation;
   /** Residue to centre attention on. The viewer may frame or mark it. */
   focus?: number | null;
   /** Substitutions to model on the backbone. Drives side-chain rebuilding. */
@@ -148,6 +190,26 @@ export interface AgentResult {
  * ribbon, an explicit `style` override, links of two different roles, and a
  * result that must leave the structure untouched.
  */
+/**
+ * What to draw when the backend does not say. Derived from `kind`, so a result
+ * that omits `representation` still gets something sensible.
+ */
+export function defaultRepresentation(kind: ResultKind): Representation {
+  switch (kind) {
+    case "region":
+      // A stretch of chain: the ribbon carries it, and SS colouring makes the
+      // element the region sits in legible.
+      return { base: "cartoon", color: "secondary_structure", termini: true };
+    case "ranking":
+      // Several positions at once; a quiet base keeps them distinguishable.
+      return { base: "cartoon", color: "uniform" };
+    case "none":
+      return { base: "cartoon", color: "gradient" };
+    default:
+      return { base: "cartoon", color: "gradient", disulfides: false };
+  }
+}
+
 export const RESULT_EXAMPLES: AgentResult[] = [
   {
     result_id: "ex-1-single",
@@ -230,6 +292,14 @@ export const RESULT_EXAMPLES: AgentResult[] = [
     view: {
       protein_id: "IsPETase",
       chain: "A",
+      // A question about a stretch of chain: colour by element so the reviewer
+      // can see whether the loop sits between a helix and a strand.
+      representation: {
+        base: "cartoon",
+        color: "secondary_structure",
+        disulfides: true,
+        termini: true,
+      },
       focus: 187,
       highlights: [
         {
@@ -260,6 +330,9 @@ export const RESULT_EXAMPLES: AgentResult[] = [
     view: {
       protein_id: "IsPETase",
       chain: "A",
+      // Two candidates set against each other: mute the base so the only
+      // colours on screen are the two being compared.
+      representation: { base: "cartoon", color: "uniform" },
       focus: 160,
       highlights: [
         { residues: [121], role: "support", label: "S121E" },

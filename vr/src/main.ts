@@ -1,14 +1,16 @@
 /**
- * PETase Lab — VR approval gate and combination bench.
+ * PETase Lab — VR.
  *
- * Two directions of the same loop. The gate pauses the agents on a flagged
- * candidate and sends a human decision back. The bench lets the reviewer stack
- * mutations into a variant, see the structural consequences immediately, and
- * propose it back as a human-origin candidate.
+ * One loop, three surfaces around the molecule:
  *
- * Layout: the protein in the middle, the agent's candidate on the left, the
- * bench on the right, and the picked residue on a tilted surface below with a
- * leader line back to the atom it describes.
+ *   left    the project — every question this session, the experiments worth
+ *           keeping, and a log of what the system actually did
+ *   below   the console — where a question is spoken and sent, carrying the
+ *           format contract the lab must answer in
+ *   right   the answer — brief by default, "Review in depth" for the rest
+ *
+ * The molecule in the middle is driven entirely by the answer's `view`: the
+ * backend names residues and roles, the viewer decides how they look.
  *
  * Runs in the Quest browser via WebXR (`immersive-ar` so the protein sits in
  * the room, falling back to `immersive-vr`) and on the desktop with mouse
@@ -18,7 +20,6 @@
 import {
   ACESFilmicToneMapping,
   AmbientLight,
-  BufferAttribute,
   BufferGeometry,
   Clock,
   Color,
@@ -42,63 +43,70 @@ import {
 } from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import {
+  deleteExperiment,
   explore,
   getBridgeHealth,
   getBridgeRuns,
   getConfig,
+  getExperiments,
   getQueue,
   getStructure,
   postDecision,
-  setLabel,
-  proposeVariant,
+  saveExperiment,
   reviewer,
-  scoreVariant,
+  type SavedExperimentRecord,
   type Candidate,
   type DecisionKind,
   type BridgeHealth,
   type BridgeRun,
   type GateConfig,
-  type VariantPayload,
 } from "./api";
 import {
   buildCartoon,
   buildResidueSticks,
+  findDisulfides,
   recolorCartoon,
+  schemeColors,
+  termini,
   closestAtomPair,
-  oneLetter,
   parsePDB,
   type Structure,
 } from "./protein";
 import {
-  buildBenchOverlay,
   buildHighlights,
   makeLabel,
   PickMarker,
   residueCentroid,
-  type HighlightResult,
 } from "./highlight";
-import { ReviewPanel, type PanelState, type PanelTab } from "./panel";
-import { BenchPanel, type BenchTab } from "./benchPanel";
-import { RESULT_EXAMPLES, type AgentResult } from "./result";
+import {
+  ProjectPanel,
+  type LogLine,
+  type ProjectLink,
+  type ProjectTab,
+  type QuestionStatus,
+  type SessionQuestion,
+} from "./projectPanel";
+import { ConsolePanel } from "./console";
+import { AnswerPanel } from "./answerPanel";
+import {
+  defaultRepresentation,
+  RESULT_EXAMPLES,
+  type AgentResult,
+  type Representation,
+} from "./result";
+import { buildAgentPrompt, parseAnswer, promptSize } from "./prompt";
 import { ControlBar } from "./controlBar";
-import { LogPanel, type Link, type LogEntry } from "./logPanel";
-import { ResidueCard, type SubstitutionRow } from "./residueCard";
-import { Bench } from "./bench";
-import { epistasisPairs, residueMetrics, type EpistasisPair } from "./metrics";
-import { loadScan, type Scan } from "./scan";
 import { mutateResidue } from "./rotamer";
 import { VoiceInput, voiceHealth } from "./voice";
 import { XRInput } from "./input";
-import { THEME, disposeGroup, makeGrabBar, type CanvasPanel } from "./ui";
+import { disposeGroup, makeGrabBar, type CanvasPanel } from "./ui";
 
 const PROTEIN_ANCHOR = new Vector3(0, 1.38, -0.8);
-const REVIEW_ANCHOR = new Vector3(-0.62, 1.44, -0.56);
-const BENCH_ANCHOR = new Vector3(0.62, 1.44, -0.56);
-const CARD_ANCHOR = new Vector3(0, 0.95, -0.52);
 const TARGET_RADIUS_M = 0.3;
 /** Desktop-only backdrop; passthrough replaces it with the real room. */
 const DESKTOP_BG = 0xcfdae5;
 const POLL_MS = 2000;
+const SCROLL_STEP = 170;
 
 const statusEl = document.getElementById("status") as HTMLParagraphElement;
 const queueEl = document.getElementById("queue-line") as HTMLParagraphElement;
@@ -108,6 +116,15 @@ function setStatus(text: string, state: "ok" | "error" = "ok"): void {
   statusEl.textContent = text;
   statusEl.dataset.state = state;
 }
+
+/**
+ * `?passthrough=1` drops the backdrop so the page behind the canvas shows
+ * through. Panel legibility only has to hold over an arbitrary room, and a
+ * clean desktop grid flatters it in a way passthrough never will — this makes
+ * that testable without putting the headset on.
+ */
+const SIMULATE_PASSTHROUGH =
+  new URLSearchParams(location.search).get("passthrough") === "1";
 
 // ---------------------------------------------------------------- renderer
 
@@ -151,66 +168,39 @@ scene.add(rim);
 const scenery = new Group();
 scenery.add(new GridHelper(6, 24, 0x93a9bd, 0xb6c6d5));
 scene.add(scenery);
-/**
- * `?passthrough=1` drops the backdrop so the page behind the canvas shows
- * through. Panel legibility only has to hold over an arbitrary room, and a
- * clean desktop grid flatters it in a way passthrough never will — this makes
- * that testable without putting the headset on.
- */
-const SIMULATE_PASSTHROUGH =
-  new URLSearchParams(location.search).get("passthrough") === "1";
-scene.background = SIMULATE_PASSTHROUGH ? null : new Color(DESKTOP_BG);
-if (SIMULATE_PASSTHROUGH) scenery.visible = false;
+
+function setDesktopBackdrop(): void {
+  scene.background = SIMULATE_PASSTHROUGH ? null : new Color(DESKTOP_BG);
+  scenery.visible = !SIMULATE_PASSTHROUGH;
+}
+setDesktopBackdrop();
 
 const proteinGroup = new Group();
 proteinGroup.position.copy(PROTEIN_ANCHOR);
 scene.add(proteinGroup);
 
-const reviewPanel = new ReviewPanel();
-reviewPanel.group.position.copy(REVIEW_ANCHOR);
-reviewPanel.group.rotation.y = 0.55;
-scene.add(reviewPanel.group);
+const projectPanel = new ProjectPanel();
+scene.add(projectPanel.group);
 
-const benchPanel = new BenchPanel();
-benchPanel.group.position.copy(BENCH_ANCHOR);
-benchPanel.group.rotation.y = -0.55;
-scene.add(benchPanel.group);
+const answerPanel = new AnswerPanel();
+scene.add(answerPanel.group);
 
-const residueCard = new ResidueCard();
-residueCard.group.position.copy(CARD_ANCHOR);
-residueCard.group.rotation.x = -0.55;
-scene.add(residueCard.group);
+const consolePanel = new ConsolePanel();
+scene.add(consolePanel.group);
 
 const controlBar = new ControlBar();
 scene.add(controlBar.group);
 
-const logPanel = new LogPanel();
-scene.add(logPanel.group);
-
-reviewPanel.addGrabBar();
-benchPanel.addGrabBar();
-residueCard.addGrabBar();
+projectPanel.addGrabBar();
+answerPanel.addGrabBar();
+consolePanel.addGrabBar();
 controlBar.addGrabBar();
-logPanel.addGrabBar();
 
 const pickMarker = new PickMarker();
 proteinGroup.add(pickMarker.group);
 
 /** The molecule's own handle, rebuilt per structure because it is sized in Å. */
 let proteinHandle: Group | null = null;
-
-// Leader line from the picked residue to the card describing it — the one
-// piece of geometry that has to move every frame, so it mutates a preallocated
-// attribute rather than rebuilding anything.
-const leaderGeometry = new BufferGeometry();
-leaderGeometry.setAttribute("position", new BufferAttribute(new Float32Array(6), 3));
-const leaderLine = new Line(
-  leaderGeometry,
-  new LineBasicMaterial({ color: THEME.pick, transparent: true, opacity: 0.7 }),
-);
-leaderLine.visible = false;
-leaderLine.frustumCulled = false;
-scene.add(leaderLine);
 
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.target.copy(PROTEIN_ANCHOR);
@@ -229,9 +219,6 @@ controls.update();
  * behind you with no way to reach it. Laying out from the live head pose means
  * entering MR — or clicking the thumbstick — always puts the workspace in
  * front of you.
- *
- * Distances are chosen so nothing crowds the view: at ~1.4 m a 0.64 m panel
- * subtends about 26°, against roughly 60° when it sat at 0.56 m.
  */
 interface LayoutSlot {
   object: Object3D;
@@ -248,15 +235,15 @@ interface LayoutSlot {
 }
 
 const layout: LayoutSlot[] = [
-  { object: proteinGroup, right: 0, up: 0.02, forward: 1.15, yaw: 0, pitch: 0 },
-  { object: reviewPanel.group, right: -0.80, up: 0.10, forward: 1.18, yaw: 0.6, pitch: 0 },
-  { object: benchPanel.group, right: 0.78, up: 0.12, forward: 1.15, yaw: -0.6, pitch: 0 },
-  { object: residueCard.group, right: 0, up: -0.5, forward: 0.85, yaw: 0, pitch: -0.62 },
+  { object: proteinGroup, right: 0, up: 0.04, forward: 1.15, yaw: 0, pitch: 0 },
+  { object: projectPanel.group, right: -0.80, up: 0.10, forward: 1.18, yaw: 0.6, pitch: 0 },
+  { object: answerPanel.group, right: 0.80, up: 0.12, forward: 1.16, yaw: -0.6, pitch: 0 },
+  // The console is where a session starts, so it sits where the hands are:
+  // below the molecule, tilted up toward the face.
+  { object: consolePanel.group, right: 0, up: -0.40, forward: 0.96, yaw: 0, pitch: -0.42 },
   // Raised until its grab handle clears the molecule labels: the handle hangs
   // below the bar, so the bar body being clear was not enough.
   { object: controlBar.group, right: 0, up: 0.64, forward: 1.32, yaw: 0, pitch: 0.3 },
-  // Under the gate panel on the left, clear of the residue card in the centre.
-  { object: logPanel.group, right: -0.70, up: -0.38, forward: 1.04, yaw: 0.55, pitch: -0.22 },
 ];
 
 const placeables: Object3D[] = layout.map((slot) => slot.object);
@@ -338,110 +325,138 @@ interface LoadedStructure {
 const structureCache = new Map<string, LoadedStructure>();
 
 let config: GateConfig | null = null;
-let scan: Scan | null = null;
-
-let queue: Candidate[] = [];
-let index = 0;
-let current: Candidate | null = null;
 let currentStructure: Structure | null = null;
-let highlights: HighlightResult | null = null;
 let siteOverlay: Group | null = null;
-let benchOverlay: Group | null = null;
-let flash: PanelState["flash"] = null;
-let flashUntil = 0;
 let pickedPos: number | null = null;
-let pickedCentroid: Vector3 | null = null;
-let message: string | null = null;
-let benchMessage: string | null = null;
-let busy = false;
 /** Counts down after an XR session starts; 0 means nothing pending. */
 let pendingRecenterFrames = 0;
 let bridgeHealth: BridgeHealth | null = null;
 let gateReachable = false;
+let voiceAvailable = false;
+/** Candidates the lab has flagged for a human. Logged, decided by keyboard. */
+let queue: Candidate[] = [];
 
 const bootedAt = performance.now();
-const logEntries: LogEntry[] = [];
+const logEntries: LogLine[] = [];
 
-/** Append to the activity tail. Repeats are collapsed so one failing poll
- * every 2 s does not bury everything that came before it. */
-function log(text: string, level: LogEntry["level"] = "info"): void {
-  const last = logEntries[logEntries.length - 1];
-  if (last && last.text === text) return;
-  logEntries.push({ t: (performance.now() - bootedAt) / 1000, text, level });
-  if (logEntries.length > 60) logEntries.shift();
+/** Seconds since the viewer started — the clock every log line and question
+ * is stamped with, so the session reads in order. */
+function now(): number {
+  return (performance.now() - bootedAt) / 1000;
 }
 
-function links(): Link[] {
-  const scanReal = scan?.source === "model";
+/** Append to the run log. Repeats are collapsed so one failing poll every 2 s
+ * does not bury everything that came before it. */
+function log(text: string, level: LogLine["level"] = "info"): void {
+  const last = logEntries[logEntries.length - 1];
+  if (last && last.text === text) return;
+  logEntries.push({ t: now(), text, level });
+  if (logEntries.length > 80) logEntries.shift();
+}
+
+function links(): ProjectLink[] {
   return [
     {
       name: "Gate API",
-      state: gateReachable ? "ok" : "down",
+      ok: gateReachable,
       detail: gateReachable
-        ? `queue, decisions and structures · ${queue.length} pending`
+        ? `queries, experiments and structures · ${queue.length} flagged for review`
         : "not answering — is the gate running on :8000?",
     },
     {
       name: "Agent lab bridge",
-      state: bridgeHealth?.reachable ? "ok" : bridgeHealth ? "down" : "unknown",
+      ok: !!bridgeHealth?.reachable,
       detail: bridgeHealth?.reachable
         ? `${bridgeHealth.bridge_url} · schema ${bridgeHealth.schema_version ?? "?"}`
         : `${bridgeHealth?.bridge_url ?? "unknown"} — start it or set BRIDGE_URL`,
     },
     {
       name: "Structure",
-      state: currentStructure ? "ok" : "down",
+      ok: !!currentStructure,
       detail: currentStructure
         ? `${config?.structure_id ?? "?"} chain ${config?.chain ?? "?"} · ${currentStructure.residues.size} residues`
         : "no PDB loaded",
     },
     {
       name: "Voice",
-      state: voiceAvailable ? "ok" : "degraded",
+      ok: voiceAvailable,
       detail: voiceAvailable
-        ? "gate can transcribe · hold the bar button to ask"
+        ? "gate can transcribe · hold the console button to ask"
         : "no OPENAI_API_KEY on the gate — voice disabled",
-    },
-    {
-      name: "Mutation scores",
-      state: scanReal ? "ok" : "degraded",
-      detail: scanReal
-        ? `${scan?.model} single-mutant scan`
-        : "placeholder — GET /scan is not live yet",
     },
   ];
 }
 
-function fullyConnected(): boolean {
-  return links().every((l) => l.state === "ok");
+/** The residue under the ray, named for the console. */
+function pickedLabel(): string | null {
+  if (pickedPos == null || !currentStructure) return null;
+  const res = currentStructure.residues.get(pickedPos);
+  return res ? `${res.resName} ${res.resSeq}` : null;
 }
+
+function fullyConnected(): boolean {
+  return links().every((l) => l.ok);
+}
+
+// ------------------------------------------------------------ the project
+
+let projectTab: ProjectTab = "questions";
+let projectScroll = 0;
+const questions: SessionQuestion[] = [];
+let experiments: SavedExperimentRecord[] = [];
 /** Newest unfinished exploration from the agent lab, if any. */
 let activeRun: BridgeRun | null = null;
-let voiceAvailable = false;
-/** Which field the next transcript fills. null = a question for the lab. */
-let voiceTarget: "label" | "note" | null = null;
-/** Captured by voice, attached to the next decision. */
-let pendingNote: string | null = null;
-/** Dismiss is armed and the next press commits. */
-let confirmingDismiss = false;
-/** Which view of the candidate the review panel is showing. */
-let panelTab: PanelTab = "summary";
-let panelScroll = 0;
 
-const SCROLL_STEP = 160;
-
-/** The right-hand panel: what you are building, or what came back. */
-let benchTab: BenchTab = "bench";
-/** Results available to step through. Seeded with the example set so every
- * rendering path can be exercised before the backend sends anything. */
-let results: AgentResult[] = [...RESULT_EXAMPLES];
-let resultIndex = 0;
-
-function currentResult(): AgentResult | null {
-  return results[resultIndex] ?? null;
+/**
+ * One answer the reviewer can look at.
+ *
+ * `prose` and `problem` are kept beside the result rather than in it: they are
+ * facts about *this reply*, not part of the contract, and a saved experiment
+ * should not carry a complaint about formatting into the record.
+ */
+interface AnswerEntry {
+  result: AgentResult | null;
+  prose: string;
+  problem: string | null;
+  /** True for the built-in examples, so they are never saved as findings. */
+  example?: boolean;
 }
 
-/** Push-to-talk. Repaints on every state change so the bar tracks it live. */
+// Seeded with the example set so every rendering path can be exercised with the
+// arrows before the lab sends anything.
+const answers: AnswerEntry[] = RESULT_EXAMPLES.map((result) => ({
+  result,
+  prose: "",
+  problem: null,
+  example: true,
+}));
+let answerIndex = 0;
+let answerDeep = false;
+let answerScroll = 0;
+
+function currentAnswer(): AnswerEntry | null {
+  return answers[answerIndex] ?? null;
+}
+
+/** Show an answer and rebuild the molecule from it. */
+function selectAnswer(index: number): void {
+  if (index < 0 || index >= answers.length) return;
+  answerIndex = index;
+  answerDeep = false;
+  answerScroll = 0;
+  applyResultView(currentAnswer()?.result ?? null);
+}
+
+function markQuestion(query_id: string, patch: Partial<SessionQuestion>): void {
+  const q = questions.find((item) => item.query_id === query_id);
+  if (!q) return;
+  Object.assign(q, patch);
+  for (const other of questions) other.current = other === q;
+}
+
+// ---------------------------------------------------------------- voice
+
+/** Push-to-talk. Repaints on every state change so the console tracks it live. */
 const voice = new VoiceInput(() => repaint());
 
 async function beginVoice(): Promise<boolean> {
@@ -454,63 +469,41 @@ async function beginVoice(): Promise<boolean> {
 
 async function endVoice(): Promise<void> {
   if (voice.state !== "recording") return;
-  const target = voiceTarget;
   const result = await voice.stopAndSend();
-
   if (!result?.ok) {
     if (voice.lastError) log(`voice: ${voice.lastError}`, "warn");
-    voiceTarget = null;
-    repaint();
-    return;
-  }
-
-  if (target === "label" && current) {
-    try {
-      await setLabel(current.candidate_id, result.text);
-      current.label = result.text;
-      log(`named ${current.candidate_id}: "${result.text}"`.slice(0, 70));
-    } catch (error) {
-      log(`rename failed: ${(error as Error).message}`, "error");
-    }
-    voice.lastText = "";
-  } else if (target === "note") {
-    pendingNote = result.text;
-    log(`note ready: "${result.text}"`.slice(0, 70));
-    voice.lastText = "";
   } else {
     log(`heard: "${result.text}"`.slice(0, 70));
   }
-
-  voiceTarget = null;
-  repaint();
-}
-
-/** Start recording for a specific field rather than for a new question. */
-async function captureInto(target: "label" | "note"): Promise<void> {
-  if (!current) return;
-  if (voice.state === "recording") {
-    await endVoice();
-    return;
-  }
-  voiceTarget = target;
-  if (!(await beginVoice())) voiceTarget = null;
   repaint();
 }
 
 /**
- * Hand the transcript to the agent lab. Separate from recording so a misheard
- * question can be discarded instead of silently becoming the next query.
+ * Hand the question to the agent lab, with the contract attached.
+ *
+ * The question never travels alone: `buildAgentPrompt` wraps it in the format
+ * the answer must come back in, because a bare question gets prose back and
+ * prose renders as nothing in the middle of the room.
  */
-async function sendTranscript(): Promise<void> {
+async function sendQuestion(): Promise<void> {
   const query = voice.lastText.trim();
   if (!query || voice.dispatching) return;
+
   voice.dispatching = true;
   repaint();
   try {
-    const { query_id } = await explore(query, "mock");
-    log(`sent to lab: "${query}" → ${query_id}`.slice(0, 70));
+    const mode = bridgeHealth?.reachable ? "live" : "mock";
+    const { query_id } = await explore(buildAgentPrompt(query), mode);
+
+    for (const q of questions) q.current = false;
+    questions.push({ query_id, query, status: "running", at: now(), current: true });
+    if (questions.length > 40) questions.shift();
+
+    log(`asked the lab (${mode}): "${query}" → ${query_id}`.slice(0, 76));
     voice.lastText = "";
     voice.lastError = null;
+    projectTab = "questions";
+    projectScroll = 0;
   } catch (error) {
     voice.lastError = `could not reach the lab: ${(error as Error).message}`;
     log(`send failed: ${(error as Error).message}`, "error");
@@ -520,133 +513,68 @@ async function sendTranscript(): Promise<void> {
   }
 }
 
-const bench = new Bench();
-
-function activeSiteResidues(): number[] {
-  return current?.active_site_residues ?? config?.active_site_residues ?? [];
-}
-
-function currentEpistasis(): EpistasisPair[] {
-  if (!currentStructure) return [];
-  return epistasisPairs(currentStructure, bench.enabledPositions);
-}
-
 // ---------------------------------------------------------------- painting
 
-function panelState(): PanelState {
-  return {
-    candidate: current,
-    queue,
-    queueIndex: index,
-    queueTotal: queue.length,
-    measuredDistance: highlights?.distance ?? null,
-    measuredNearest: highlights?.nearestResidue ?? null,
-    wtMismatch: highlights?.wtMismatch ?? false,
-    pickedResidue:
-      pickedPos != null && currentStructure
-        ? `${currentStructure.residues.get(pickedPos)?.resName ?? "?"} ${pickedPos}`
-        : null,
-    inBench:
-      current && current.kind !== "claim" ? bench.has(current.mutation.pos) : false,
-    confirmingDismiss,
-    pendingNote,
-    voiceTarget,
-    tab: panelTab,
-    scroll: panelScroll,
-    flash,
-    message,
-    reviewer,
-  };
-}
-
-function paintResidueCard(): void {
-  if (pickedPos == null || !currentStructure) {
-    residueCard.visible = false;
-    leaderLine.visible = false;
-    return;
-  }
-
-  const res = currentStructure.residues.get(pickedPos);
-  if (!res) {
-    residueCard.visible = false;
-    leaderLine.visible = false;
-    return;
-  }
-
-  const wt = oneLetter(res.resName);
-  const substitutions: SubstitutionRow[] =
-    scan?.ranked(pickedPos, wt).map((row) => ({
-      mut: row.mut,
-      llr: row.llr,
-      inBench: bench.at(pickedPos!)?.mut === row.mut,
-    })) ?? [];
-
-  residueCard.render({
-    pos: pickedPos,
-    wt,
-    resName: res.resName,
-    chain: res.chain,
-    metrics: residueMetrics(currentStructure, pickedPos, activeSiteResidues()),
-    substitutions,
-    scan,
-    blocked: bench.full && !bench.has(pickedPos),
-    isActiveSite: activeSiteResidues().includes(pickedPos),
-  });
-
-  residueCard.visible = true;
-  leaderLine.visible = true;
-}
-
 function repaint(): void {
-  reviewPanel.render(panelState());
-  benchPanel.render({
-    tab: benchTab,
-    result: currentResult(),
-    resultIndex,
-    resultCount: results.length,
-    bench,
-    epistasis: currentEpistasis(),
-    scan,
-    message: benchMessage,
-    busy,
+  const answer = currentAnswer();
+  const busy = !!activeRun;
+
+  projectPanel.render({
+    tab: projectTab,
+    scroll: projectScroll,
+    reviewer,
+    questions,
+    experiments,
+    log: logEntries,
+    links: links(),
+    connected: fullyConnected(),
   });
-  paintResidueCard();
+
+  answerPanel.render({
+    result: answer?.result ?? null,
+    prose: answer?.prose ?? "",
+    problem: answer?.problem ?? null,
+    deep: answerDeep,
+    scroll: answerScroll,
+    index: answerIndex,
+    count: answers.length,
+    busy,
+    busyStage: activeRun ? `${activeRun.stage} · ${activeRun.message || activeRun.query}`.slice(0, 60) : null,
+    busyProgress: activeRun ? activeRun.progress : null,
+  });
+
+  consolePanel.render({
+    reviewer,
+    voiceAvailable: voiceAvailable && voice.supported,
+    voiceState: voice.state,
+    transcript: voice.lastText,
+    error: voice.lastError,
+    sending: voice.dispatching,
+    busyStage: activeRun ? activeRun.stage : null,
+    asked: questions.length,
+    picked: pickedLabel(),
+    contextChars: promptSize(voice.lastText).context,
+  });
 
   controlBar.render({
     headline: activeRun
       ? `${activeRun.stage} · ${activeRun.message || activeRun.query}`.slice(0, 64)
-      : current
-        ? `reviewing ${current.kind === "claim" ? (current.claim?.headline ?? "claim") : current.mutation.label}`.slice(0, 64)
-        : "waiting for agents — bench is live",
-    queueTotal: queue.length,
-    benchCount: bench.count,
+      : (answer?.result?.headline ?? "ask the console what to look at").slice(0, 64),
     reviewer,
+    asked: questions.length,
+    saved: experiments.length,
     progress: activeRun ? activeRun.progress : null,
-    voice: {
-      state: voice.state,
-      available: voiceAvailable && voice.supported,
-      lastText: voice.lastText,
-      lastError: voice.lastError,
-      sending: voice.dispatching,
-    },
+    connected: fullyConnected(),
   });
 
-  logPanel.render({
-    links: links(),
-    entries: logEntries,
-    fullyConnected: fullyConnected(),
-  });
-
-  queueEl.textContent = current
-    ? `${current.candidate_id} · ${current.mutation.label} · ${index + 1}/${queue.length} pending · bench ${bench.count}`
-    : `${queue.length} pending · bench ${bench.count}`;
+  queueEl.textContent = `${questions.length} asked · ${experiments.length} saved · ${queue.length} flagged for review`;
 }
 
 // ---------------------------------------------------------------- structure
 
 async function loadStructure(url: string, chain: string): Promise<LoadedStructure> {
-  const key = `${url}#${chain}`;
-  const hit = structureCache.get(key);
+  const cacheKey = `${url}#${chain}`;
+  const hit = structureCache.get(cacheKey);
   if (hit) return hit;
 
   const text = await getStructure(url);
@@ -655,8 +583,12 @@ async function loadStructure(url: string, chain: string): Promise<LoadedStructur
     throw new Error(`no residues for chain ${chain} in ${url}`);
   }
   const loaded = { structure, backbone: buildCartoon(structure) };
-  structureCache.set(key, loaded);
+  structureCache.set(cacheKey, loaded);
   return loaded;
+}
+
+function activeSiteResidues(): number[] {
+  return config?.active_site_residues ?? [];
 }
 
 async function mountStructure(url: string, chain: string): Promise<Structure> {
@@ -683,9 +615,9 @@ async function mountStructure(url: string, chain: string): Promise<Structure> {
     void import("./rotamerTest").then((m) => m.runRotamerTest(structure));
   }
 
-  // The catalytic triad is drawn even with no candidate queued, so the bench is
-  // usable — and the active site is visible — while the agents are still
-  // thinking.
+  // The catalytic triad is drawn with no question asked, so the active site is
+  // visible while the lab is still thinking. Its numbering comes from the
+  // backend config, which verified it against this PDB file.
   if (siteOverlay) {
     proteinGroup.remove(siteOverlay);
     disposeGroup(siteOverlay);
@@ -706,8 +638,8 @@ async function mountStructure(url: string, chain: string): Promise<Structure> {
  *
  * The backend speaks in residues and roles; the mapping from role to colour
  * lives here, so the contract stays stable while the visuals change. Mutations
- * in the view are modelled on the real backbone like any other, so a proposed
- * substitution is shown as the residue it would become.
+ * in the view are modelled on the real backbone, so a proposed substitution is
+ * shown as the residue it would become.
  */
 let resultOverlay: Group | null = null;
 
@@ -733,12 +665,17 @@ function applyResultView(result: AgentResult | null): void {
   const view = result?.view;
   if (!currentStructure || !view) {
     if (backbone) recolorCartoon(backbone, new Map());
+    if (siteOverlay) siteOverlay.visible = true;
     repaint();
     return;
   }
 
   const group = new Group();
   group.name = "result-overlay";
+
+  // The answer's own highlights speak for the active site when they name it;
+  // keeping the standing triad overlay as well would double every label.
+  if (siteOverlay) siteOverlay.visible = false;
 
   // Substitutions become real side chains, not just coloured spheres.
   const modelled = (view.mutations ?? [])
@@ -754,10 +691,43 @@ function applyResultView(result: AgentResult | null): void {
     );
   }
 
+  // The base model first: the scheme paints every residue, then highlights
+  // paint over the ones they name.
+  const rep: Representation = view.representation ?? defaultRepresentation(result.kind);
+  const repaintBase = schemeColors(currentStructure, rep.color);
+
+  if (rep.disulfides) {
+    for (const ss of findDisulfides(currentStructure)) {
+      const line = new Line(
+        new BufferGeometry().setFromPoints([ss.posA, ss.posB]),
+        new LineBasicMaterial({ color: 0xe8c33a, linewidth: 2 }),
+      );
+      group.add(line);
+      const mid = ss.posA.clone().add(ss.posB).multiplyScalar(0.5);
+      const label = makeLabel(`SS ${ss.a}-${ss.b}`, 0xb08900, 1.5);
+      label.position.copy(mid).add(new Vector3(0, 1.6, 0));
+      group.add(label);
+    }
+  }
+
+  if (rep.termini) {
+    const ends = termini(currentStructure);
+    if (ends) {
+      for (const [res, text, color] of [
+        [ends.n, "N", 0x2461c4],
+        [ends.c, "C", 0xa62638],
+      ] as const) {
+        const label = makeLabel(text, color, 3.0);
+        label.position.copy(residueCentroid(res)).add(new Vector3(0, 3.2, 0));
+        group.add(label);
+      }
+    }
+  }
+
   // Highlights repaint the ribbon itself. Drawing a second representation over
   // the cartoon was what made a result look like two models fighting rather
   // than one molecule responding.
-  const repaintMap = new Map<number, Color>();
+  const repaintMap = new Map<number, Color>(repaintBase);
   const mutated = new Set((view.mutations ?? []).map((m) => m.pos));
 
   for (const h of view.highlights ?? []) {
@@ -828,80 +798,169 @@ function applyResultView(result: AgentResult | null): void {
     const res = currentStructure.residues.get(view.focus);
     if (res) {
       pickedPos = res.resSeq;
-      pickedCentroid = residueCentroid(res);
       pickMarker.show(res);
     }
   }
   repaint();
 }
 
-function rebuildBenchOverlay(): void {
-  if (benchOverlay) {
-    proteinGroup.remove(benchOverlay);
-    disposeGroup(benchOverlay);
-    benchOverlay = null;
+// ------------------------------------------------------------- experiments
+
+/** Keep the answer on screen as part of the project record. */
+async function saveCurrentAnswer(): Promise<void> {
+  const entry = currentAnswer();
+  const result = entry?.result;
+  if (!result) {
+    log("nothing to save — no answer on screen", "warn");
+    repaint();
+    return;
   }
-  if (!currentStructure || bench.count === 0) return;
-
-  // Model the mutant side chain on the measured backbone. This is what makes
-  // S121E look like a glutamate instead of a highlighted serine, and the clash
-  // count it returns is a real structural signal the panel can show.
-  benchOverlay = buildBenchOverlay(currentStructure, {
-    mutations: bench.mutations.map((m) => {
-      const built = mutateResidue(currentStructure!, m.pos, m.mut);
-      m.clashes = built?.clashes;
-      return {
-        pos: m.pos,
-        label: m.label,
-        enabled: m.enabled,
-        residue: built && !built.failed ? built.residue : null,
-      };
-    }),
-    epistasis: currentEpistasis(),
-  });
-  proteinGroup.add(benchOverlay);
-}
-
-async function showCandidate(candidate: Candidate | null): Promise<void> {
-  if (candidate?.candidate_id !== current?.candidate_id) {
-    panelScroll = 0;
-    confirmingDismiss = false;
-  }
-  current = candidate;
-
-  if (highlights) {
-    proteinGroup.remove(highlights.group);
-    disposeGroup(highlights.group);
-    highlights = null;
-  }
-
-  if (siteOverlay) siteOverlay.visible = !candidate;
-
-  if (!candidate) {
+  if (entry?.example) {
+    log("that is a built-in example, not a finding — ask the lab first", "warn");
+    projectTab = "log";
     repaint();
     return;
   }
 
-  const structure = await mountStructure(candidate.pdb_url, candidate.chain);
-
-  highlights = buildHighlights(structure, {
-    mutationPos: candidate.mutation.pos,
-    mutationLabel: candidate.mutation.label,
-    expectedWt: candidate.mutation.wt,
-    activeSite: candidate.active_site_residues,
-  });
-  proteinGroup.add(highlights.group);
-
-  setStatus(`reviewing ${candidate.mutation.label} (${candidate.candidate_id})`);
+  try {
+    const saved = await saveExperiment({
+      query: result.query ?? "",
+      query_id: result.query_id ?? null,
+      headline: result.headline,
+      kind: result.kind,
+      result: result as unknown as Record<string, unknown>,
+    });
+    experiments = [saved, ...experiments.filter((e) => e.experiment_id !== saved.experiment_id)];
+    log(`saved ${saved.experiment_id}: ${result.headline}`.slice(0, 76));
+    projectTab = "experiments";
+    projectScroll = 0;
+  } catch (error) {
+    log(`save failed: ${(error as Error).message}`, "error");
+  }
   repaint();
 }
 
-// ---------------------------------------------------------------- gate flow
+/** Reopen a saved experiment: its answer and its molecule, exactly as kept. */
+function loadExperiment(experiment_id: string): void {
+  const record = experiments.find((e) => e.experiment_id === experiment_id);
+  const stored = record?.result as AgentResult | undefined;
+  if (!stored) {
+    log(`${experiment_id} has no stored view to rebuild`, "warn");
+    repaint();
+    return;
+  }
+  const existing = answers.findIndex(
+    (a) => !a.example && a.result?.result_id === stored.result_id,
+  );
+  if (existing >= 0) {
+    selectAnswer(existing);
+  } else {
+    answers.push({ result: stored, prose: "", problem: null });
+    selectAnswer(answers.length - 1);
+  }
+  log(`reopened ${experiment_id}`);
+}
+
+async function refreshExperiments(): Promise<void> {
+  try {
+    const { experiments: saved } = await getExperiments();
+    experiments = saved;
+  } catch {
+    // The project record is not worth failing a poll over.
+  }
+}
+
+async function removeExperiment(experiment_id: string): Promise<void> {
+  try {
+    await deleteExperiment(experiment_id);
+    experiments = experiments.filter((e) => e.experiment_id !== experiment_id);
+    log(`deleted ${experiment_id}`, "warn");
+  } catch (error) {
+    log(`delete failed: ${(error as Error).message}`, "error");
+  }
+  repaint();
+}
+
+// ---------------------------------------------------------------- lab flow
 
 let healthChecks = 0;
-/** Runs already written to the activity tail, so a finished one is not
- * re-reported on every poll. */
-const reportedRuns = new Set<string>();
+/** Runs already read into an answer, so a finished one is not re-read on every
+ * poll. */
+const readRuns = new Set<string>();
+
+/**
+ * Turn a finished run into something the panel and the molecule can use.
+ *
+ * The lab is a language model at the other end: it may have followed the format
+ * contract, or it may have written prose. Both are handled, and the difference
+ * is shown rather than smoothed over — a reply with no JSON block says so.
+ */
+function ingestRun(run: BridgeRun): void {
+  const raw = [run.answer?.headline, run.answer?.conclusion].filter(Boolean).join("\n\n");
+  const parsed = parseAnswer(raw);
+
+  let status: QuestionStatus = "answered";
+  let entry: AnswerEntry;
+
+  if (parsed.result) {
+    const result = parsed.result;
+    result.query ??= run.query;
+    result.query_id ??= run.query_id;
+    entry = { result, prose: parsed.prose, problem: null };
+    if (result.kind === "none") status = "empty";
+  } else {
+    // No contract-shaped block. Keep everything the run did return — headline,
+    // citations, the validation numbers — rather than throwing the run away
+    // over its formatting.
+    status = run.error ? "failed" : "answered";
+    const fallback: AgentResult | null = run.answer
+      ? {
+          result_id: run.query_id,
+          query: run.query,
+          query_id: run.query_id,
+          kind: "none",
+          headline: run.answer.headline || "the lab answered without a view",
+          summary: run.answer.conclusion ?? parsed.prose,
+          confidence: run.validation?.confidence,
+          agent_generated: true,
+          metrics: (run.validation?.checks ?? []).map((c) => ({
+            k: c.name,
+            v: `${c.value} (threshold ${c.threshold})`,
+            tier: "measured" as const,
+            warn: !c.passed,
+          })),
+          citations: (run.citations ?? []).map((c) => ({
+            doc_id: c.doc_id,
+            title: c.title,
+            year: c.year,
+            snippet: c.snippet,
+          })),
+          view: null,
+        }
+      : null;
+    entry = {
+      result: fallback,
+      prose: parsed.prose,
+      problem: run.error ?? parsed.problem ?? "no JSON block in the reply",
+    };
+  }
+
+  answers.push(entry);
+  selectAnswer(answers.length - 1);
+
+  markQuestion(run.query_id, {
+    status,
+    headline: entry.result?.headline,
+    kind: entry.result?.kind,
+    latency_ms: run.latency_ms,
+    verdict: run.validation?.verdict ?? null,
+  });
+
+  log(
+    `answer for ${run.query_id}: ${entry.problem ? `no view (${entry.problem})` : entry.result?.kind}`.slice(0, 76),
+    entry.problem ? "warn" : "info",
+  );
+}
 
 async function pollBridge(): Promise<void> {
   // Health changes rarely; the run list changes every tick.
@@ -930,56 +989,40 @@ async function pollBridge(): Promise<void> {
       log(`lab exploring: ${activeRun.query}`.slice(0, 70));
     }
     for (const run of runs) {
-      if (!run.finished || reportedRuns.has(run.query_id)) continue;
-      reportedRuns.add(run.query_id);
-      if (run.error) log(`run ${run.query_id}: ${run.error}`, "error");
-      else if (run.validation) {
-        log(
-          `run ${run.query_id} ${run.validation.verdict} in ${run.latency_ms} ms`,
-          run.validation.verdict === "PASS" ? "info" : "warn",
-        );
+      if (!run.finished || readRuns.has(run.query_id)) continue;
+      readRuns.add(run.query_id);
+      if (run.error) {
+        markQuestion(run.query_id, { status: "failed", headline: run.error });
+        log(`run ${run.query_id}: ${run.error}`, "error");
+        continue;
       }
+      ingestRun(run);
     }
   } catch {
-    // The bridge is optional: the gate works with the mock queue alone.
+    // The bridge is optional: the project record and the viewer work without it.
     activeRun = null;
   }
 }
 
 async function poll(): Promise<void> {
+  await pollBridge();
   try {
-    await pollBridge();
     const { candidates } = await getQueue();
-    message = null;
     if (!gateReachable) log("gate api connected");
     gateReachable = true;
-    const previousId = current?.candidate_id;
+
     const known = new Set(queue.map((c) => c.candidate_id));
     for (const c of candidates) {
       if (!known.has(c.candidate_id)) {
-        log(`queued ${c.kind} ${c.candidate_id} (${c.source})`);
+        // The lab still has the right to stop and ask. There is no gate panel
+        // any more, so it lands in the log where it cannot be missed.
+        log(`lab asks for review: ${c.kind} ${c.candidate_id} (${c.source}) — keys 1/2/3`, "warn");
       }
     }
     queue = candidates;
-
-    if (queue.length === 0) {
-      index = 0;
-      if (current) await showCandidate(null);
-      else repaint();
-      setStatus("waiting for agents… bench is live");
-      return;
-    }
-
-    const stillQueued = queue.findIndex((c) => c.candidate_id === previousId);
-    if (stillQueued >= 0) {
-      index = stillQueued;
-      repaint();
-      return;
-    }
-    index = Math.min(index, queue.length - 1);
-    await showCandidate(queue[index]);
+    await refreshExperiments();
+    repaint();
   } catch (error) {
-    message = "gate api unreachable";
     gateReachable = false;
     log(`gate api unreachable: ${(error as Error).message}`, "error");
     setStatus(`gate api unreachable — ${(error as Error).message}`, "error");
@@ -987,154 +1030,28 @@ async function poll(): Promise<void> {
   }
 }
 
+/**
+ * Decide the oldest flagged candidate.
+ *
+ * The lab blocks on `request_human_review`, so a flagged candidate with nobody
+ * to answer it stalls the whole run. Keyboard-only is thin, but losing the
+ * human's half of the loop entirely is not an option.
+ */
 async function decide(decision: DecisionKind): Promise<void> {
-  if (!current || busy) return;
-  busy = true;
-  const target = current;
+  const target = queue[0];
+  if (!target) return;
   try {
-    await postDecision(target.candidate_id, decision, pendingNote ?? undefined);
-    pendingNote = null;
-    confirmingDismiss = false;
+    await postDecision(target.candidate_id, decision);
+    queue = queue.slice(1);
     log(`${decision} ${target.candidate_id}${target.approval_id ? " → relayed to lab" : ""}`);
-    flash = { decision, label: `${target.mutation.label} · ${target.candidate_id}` };
-    flashUntil = performance.now() + 1100;
-    repaint();
-
-    queue = queue.filter((c) => c.candidate_id !== target.candidate_id);
-    index = Math.min(index, Math.max(queue.length - 1, 0));
-    setStatus(`${decision} sent for ${target.mutation.label}`);
-    await showCandidate(queue[index] ?? null);
+    setStatus(`${decision} sent for ${target.candidate_id}`);
   } catch (error) {
     log(`decision failed: ${(error as Error).message}`, "error");
-    message = "decision failed";
-    setStatus(`decision failed — ${(error as Error).message}`, "error");
-    repaint();
-  } finally {
-    busy = false;
   }
-}
-
-// ---------------------------------------------------------------- bench flow
-
-function benchChanged(note: string | null = null): void {
-  benchMessage = note;
-  rebuildBenchOverlay();
   repaint();
-}
-
-function addSubstitution(pos: number, mut: string): void {
-  if (!currentStructure || !scan) return;
-  const res = currentStructure.residues.get(pos);
-  if (!res) return;
-
-  const wt = oneLetter(res.resName);
-  const added = bench.add({
-    pos,
-    wt,
-    mut,
-    label: `${wt}${pos}${mut}`,
-    llr: scan.llr(pos, mut),
-  });
-  benchChanged(added ? null : "bench is full — remove a chip first");
-}
-
-/** Take the agent's flagged mutation onto the bench and explore around it. */
-function loadCandidateIntoBench(): void {
-  // A claim carries no residue; there is nothing to stack.
-  if (!current || current.kind === "claim" || !currentStructure || !scan) return;
-  const { pos, mut, wt } = current.mutation;
-  const structureWt = oneLetter(
-    currentStructure.residues.get(pos)?.resName ?? "",
-  );
-  const added = bench.add({
-    pos,
-    // The structure is the authority; the agent's claimed wild type may be the
-    // thing that is wrong, which is what wt_mismatch flags.
-    wt: structureWt !== "?" ? structureWt : wt,
-    mut,
-    label: current.mutation.label,
-    llr: scan.llr(pos, mut),
-  });
-  pickedPos = pos;
-  pickedCentroid = residueCentroid(currentStructure.residues.get(pos)!);
-  benchChanged(added ? null : "bench is full — remove a chip first");
-}
-
-function variantPayload(tier: "estimate" | "measured"): VariantPayload | null {
-  if (!config) return null;
-  return {
-    protein_id: config.protein_id,
-    chain: config.chain,
-    mutations: bench.labels(),
-    score: { tier, esm_llr: bench.additiveEstimate() },
-    epistasis_risk: currentEpistasis().map((pair) => ({
-      pair: [pair.a, pair.b] as [number, number],
-      distance_A: Math.round(pair.distance * 10) / 10,
-    })),
-    origin: "human",
-    proposed_by: reviewer,
-  };
-}
-
-async function requestMeasuredScore(): Promise<void> {
-  const payload = variantPayload("estimate");
-  if (!payload || busy) return;
-  const estimate = bench.additiveEstimate();
-
-  busy = true;
-  benchMessage = "scoring…";
-  repaint();
-  try {
-    const result = await scoreVariant(payload);
-    const llr = result.score?.esm_llr;
-    if (result.score?.tier === "measured" && typeof llr === "number") {
-      bench.measured = { esm_llr: llr, estimateWhenRequested: estimate };
-      benchMessage = null;
-    } else {
-      // Anything that is not an explicitly measured score stays off the panel:
-      // the estimate keeps standing rather than being quietly upgraded.
-      benchMessage = "gate returned no measured score — estimate stands";
-    }
-  } catch {
-    benchMessage = "POST /variants/score not live yet — estimate stands";
-  } finally {
-    busy = false;
-    repaint();
-  }
-}
-
-async function propose(): Promise<void> {
-  const payload = variantPayload(bench.measured ? "measured" : "estimate");
-  if (!payload || busy) return;
-  if (bench.measured) payload.score.esm_llr = bench.measured.esm_llr;
-
-  busy = true;
-  benchMessage = "proposing…";
-  repaint();
-  try {
-    const result = await proposeVariant(payload);
-    benchMessage = `proposed ${payload.mutations.join(" + ")} → ${result.variant_id}`;
-    log(`proposed variant ${result.variant_id}`);
-    setStatus(`variant proposed to the agent loop (${result.variant_id})`);
-  } catch {
-    benchMessage = "POST /proposals not live yet — variant not sent";
-    log("POST /proposals not live yet", "warn");
-  } finally {
-    busy = false;
-    repaint();
-  }
 }
 
 // ---------------------------------------------------------------- picking
-
-function closeCard(): void {
-  pickedPos = null;
-  pickedCentroid = null;
-  pickMarker.hide();
-  residueCard.visible = false;
-  leaderLine.visible = false;
-  repaint();
-}
 
 function pickProtein(raycaster: Raycaster): void {
   if (!currentStructure) return;
@@ -1146,7 +1063,9 @@ function pickProtein(raycaster: Raycaster): void {
       isRayVisible(h.object),
   );
   if (!hit) {
-    closeCard();
+    pickedPos = null;
+    pickMarker.hide();
+    repaint();
     return;
   }
 
@@ -1163,110 +1082,88 @@ function pickProtein(raycaster: Raycaster): void {
   const res = currentStructure.residues.get(best.resSeq)!;
   pickMarker.show(res);
   pickedPos = res.resSeq;
-  pickedCentroid = residueCentroid(res);
+  log(`picked ${res.resName} ${res.resSeq}`);
   repaint();
 }
+
+/** Double-press to delete, like renaming used to be: the first press arms it. */
+let armedDelete: string | null = null;
 
 function handleAction(id: string): void {
   const [kind, value, rest] = id.split(":");
   switch (kind) {
-    case "gate":
+    case "project":
       if (value === "tab") {
-        panelTab = (rest as PanelTab) ?? "summary";
-        panelScroll = 0;
-        repaint();
-        return;
-      }
-      if (value === "scroll") {
+        projectTab = (rest as ProjectTab) ?? "questions";
+        projectScroll = 0;
+        armedDelete = null;
+      } else if (value === "scroll") {
         const step = rest === "up" ? -SCROLL_STEP : SCROLL_STEP;
-        panelScroll = Math.min(
-          Math.max(panelScroll + step, 0),
-          reviewPanel.maxScroll,
+        projectScroll = Math.min(
+          Math.max(projectScroll + step, 0),
+          projectPanel.maxScroll,
         );
+      } else if (value === "save") {
+        void saveCurrentAnswer();
+        return;
+      } else if (value === "open") {
+        // Jump to the answer this question produced, if it has one.
+        const found = answers.findIndex((a) => a.result?.query_id === rest);
+        if (found >= 0) selectAnswer(found);
+        else log("that question has no answer yet", "warn");
+      } else if (value === "load") {
+        // First press reopens it; a second press on an already-open experiment
+        // is a delete, which still needs confirming.
+        if (armedDelete === rest) {
+          armedDelete = null;
+          void removeExperiment(rest);
+          return;
+        }
+        loadExperiment(rest);
+      }
+      repaint();
+      return;
+
+    case "console":
+      if (value === "ask") {
+        if (voice.state === "recording") void endVoice();
+        else void beginVoice();
+      } else if (value === "send") {
+        void sendQuestion();
+      } else if (value === "clear") {
+        voice.lastText = "";
+        voice.lastError = null;
         repaint();
+      }
+      return;
+
+    case "answer":
+      if (value === "deep") {
+        answerDeep = !answerDeep;
+        answerScroll = 0;
+      } else if (value === "scroll") {
+        const step = rest === "up" ? -SCROLL_STEP : SCROLL_STEP;
+        answerScroll = Math.min(Math.max(answerScroll + step, 0), answerPanel.maxScroll);
+      } else if (value === "prev" || value === "next") {
+        if (answers.length === 0) return;
+        const step = value === "prev" ? -1 : 1;
+        selectAnswer((answerIndex + step + answers.length) % answers.length);
         return;
       }
-      if (value === "bench") loadCandidateIntoBench();
-      else if (value === "recenter") resetLayout();
-      else if (value === "rename") void captureInto("label");
-      else if (value === "note") void captureInto("note");
-      else if (value === "dismiss") {
-        // First press arms it; it only commits on the second.
-        confirmingDismiss = true;
-        repaint();
-      } else if (value === "dismiss-confirm") {
-        confirmingDismiss = false;
-        void decide("dismiss");
-      } else {
-        confirmingDismiss = false;
-        void decide(value as DecisionKind);
-      }
-      return;
-    case "queue": {
-      const found = queue.findIndex((c) => c.candidate_id === value);
-      if (found >= 0 && found !== index) {
-        index = found;
-        void showCandidate(queue[found]);
-      }
-      return;
-    }
-    case "chip":
-      bench.toggle(Number(value));
-      benchChanged();
-      return;
-    case "del":
-      bench.remove(Number(value));
-      benchChanged();
-      return;
-    case "sub":
-      if (pickedPos != null) addSubstitution(pickedPos, value);
-      return;
-    case "card":
-      closeCard();
-      return;
-    case "voice":
-      if (value === "send") {
-        void sendTranscript();
-      } else if (voice.state === "recording") {
-        // Click to start, click again to stop — a canvas button has no hold.
-        void endVoice();
-      } else {
-        void beginVoice();
-      }
-      return;
-    case "benchtab":
-      benchTab = value as BenchTab;
-      if (benchTab === "result") applyResultView(currentResult());
       repaint();
       return;
-    case "result": {
-      if (results.length === 0) return;
-      const step = value === "prev" ? -1 : 1;
-      resultIndex = (resultIndex + step + results.length) % results.length;
-      applyResultView(currentResult());
-      log(`result case ${resultIndex + 1}/${results.length}: ${currentResult()?.kind}`);
-      repaint();
-      return;
-    }
-    case "act":
-      if (value === "clear") {
-        bench.clear();
-        benchChanged();
-      } else if (value === "score") {
-        void requestMeasuredScore();
-      } else if (value === "propose") {
-        void propose();
-      }
+
+    case "gate":
+      if (value === "recenter") resetLayout();
       return;
   }
 }
 
 const panelGroups = [
-  reviewPanel.group,
-  benchPanel.group,
-  residueCard.group,
+  projectPanel.group,
+  answerPanel.group,
+  consolePanel.group,
   controlBar.group,
-  logPanel.group,
 ];
 
 /** Panels take the ray first; anything that misses them falls through to the
@@ -1287,7 +1184,7 @@ function activate(raycaster: Raycaster): void {
 /**
  * Desktop drags start only from a grab bar. The mouse uses one button for both
  * pressing controls and moving surfaces, so without this a shaky click on a
- * substitution would fling the card across the room. In VR grip and trigger are
+ * button would fling the panel across the room. In VR grip and trigger are
  * separate buttons, so `resolveGrab` there stays forgiving.
  */
 function resolveDragHandle(raycaster: Raycaster): Object3D | null {
@@ -1301,9 +1198,9 @@ const grabProbe = new Vector3();
 
 /**
  * Three's raycaster happily reports hits on objects inside a group whose
- * `visible` is false — it only skips them at render time. Without this filter
- * the hidden residue card, which sits between the viewer and the lower half of
- * the molecule, silently swallows every grab aimed at the structure.
+ * `visible` is false — it only skips them at render time. Without this filter a
+ * hidden surface between the viewer and the molecule silently swallows every
+ * grab aimed at the structure.
  */
 function isRayVisible(object: Object3D): boolean {
   let node: Object3D | null = object;
@@ -1442,11 +1339,21 @@ window.addEventListener("keydown", (event) => {
   if (event.key === "1") void decide("approve");
   if (event.key === "2") void decide("reject");
   if (event.key === "3") void decide("defer");
-  if (event.key === "b") loadCandidateIntoBench();
-  if (event.key === "p") void propose();
   if (event.key === "r") resetLayout();
+  if (event.key === "d") {
+    answerDeep = !answerDeep;
+    answerScroll = 0;
+    repaint();
+  }
+  if (event.key === "s") void saveCurrentAnswer();
+  if (event.key === "ArrowRight") handleAction("answer:next");
+  if (event.key === "ArrowLeft") handleAction("answer:prev");
   if (event.key === "v" && !event.repeat) void beginVoice();
-  if (event.key === "Escape") closeCard();
+  if (event.key === "Escape") {
+    pickedPos = null;
+    pickMarker.hide();
+    repaint();
+  }
 });
 
 // ---------------------------------------------------------------- xr input
@@ -1494,17 +1401,7 @@ async function enterXR(mode: "immersive-ar" | "immersive-vr"): Promise<void> {
 
   session.addEventListener("end", () => {
     pendingRecenterFrames = 0;
-    scenery.visible = true;
-    /**
- * `?passthrough=1` drops the backdrop so the page behind the canvas shows
- * through. Panel legibility only has to hold over an arbitrary room, and a
- * clean desktop grid flatters it in a way passthrough never will — this makes
- * that testable without putting the headset on.
- */
-const SIMULATE_PASSTHROUGH =
-  new URLSearchParams(location.search).get("passthrough") === "1";
-scene.background = SIMULATE_PASSTHROUGH ? null : new Color(DESKTOP_BG);
-if (SIMULATE_PASSTHROUGH) scenery.visible = false;
+    setDesktopBackdrop();
     xrButton.textContent = mode === "immersive-ar" ? "enter mixed reality" : "enter VR";
     setStatus("XR session ended");
   });
@@ -1529,21 +1426,6 @@ void (async () => {
 // ---------------------------------------------------------------- loop
 
 const clock = new Clock();
-const leaderA = new Vector3();
-const leaderB = new Vector3();
-
-
-function updateLeaderLine(): void {
-  if (!leaderLine.visible || !pickedCentroid) return;
-  leaderA.copy(pickedCentroid).applyMatrix4(proteinGroup.matrixWorld);
-  leaderB.set(0, residueCard.heightMeters / 2, 0.01);
-  residueCard.group.localToWorld(leaderB);
-
-  const positions = leaderGeometry.attributes.position as BufferAttribute;
-  positions.setXYZ(0, leaderA.x, leaderA.y, leaderA.z);
-  positions.setXYZ(1, leaderB.x, leaderB.y, leaderB.z);
-  positions.needsUpdate = true;
-}
 
 renderer.setAnimationLoop(() => {
   const delta = Math.min(clock.getDelta(), 0.1);
@@ -1556,13 +1438,6 @@ renderer.setAnimationLoop(() => {
     if (pendingRecenterFrames === 0) recenterLayout();
   }
 
-  updateLeaderLine();
-
-  if (flash && performance.now() > flashUntil) {
-    flash = null;
-    repaint();
-  }
-
   renderer.render(scene, camera);
 });
 
@@ -1570,10 +1445,9 @@ renderer.setAnimationLoop(() => {
 
 void (async () => {
   setStatus("connecting to gate api…");
-  repaint();
-
   recenterLayout();
   log("viewer started");
+  repaint();
 
   try {
     const health = await voiceHealth();
@@ -1589,29 +1463,25 @@ void (async () => {
   try {
     config = await getConfig();
     await mountStructure(config.pdb_url, config.chain);
-    scan = await loadScan(config.protein_id, config.chain);
-    setStatus(
-      scan.source === "model"
-        ? `${config.protein_id} ${config.structure_id} · ${scan.model} scan loaded`
-        : `${config.protein_id} ${config.structure_id} · placeholder scores (no /scan yet)`,
-    );
-    log(
-      `${config.protein_id} ${config.structure_id} loaded · scores ${scan.source}`,
-      scan.source === "model" ? "info" : "warn",
-    );
+    gateReachable = true;
+    setStatus(`${config.protein_id} ${config.structure_id} loaded · ask the console`);
+    log(`${config.protein_id} ${config.structure_id} loaded`);
   } catch (error) {
     gateReachable = false;
     log(`boot failed: ${(error as Error).message}`, "error");
     setStatus(`gate api unreachable — ${(error as Error).message}`, "error");
   }
+
+  await refreshExperiments();
+  log(`${experiments.length} saved experiment${experiments.length === 1 ? "" : "s"} on the gate`);
   repaint();
 
   await poll();
 })();
 
 // Polling lives on a timer, not in the render loop: a backgrounded tab (or a
-// headset that has gone to sleep) parks requestAnimationFrame, and the queue
-// must keep tracking the agent loop regardless.
+// headset that has gone to sleep) parks requestAnimationFrame, and the lab must
+// keep being tracked regardless.
 let polling = false;
 setInterval(() => {
   if (polling) return;

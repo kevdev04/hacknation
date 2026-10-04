@@ -16,15 +16,15 @@ stabilizing mutations, compared with random search.
 **This repo is the VR part**, and it does two jobs:
 
 1. **The approval gate (built).** When the safety/planner agent flags a
-   candidate, the loop pauses. A scientist in a Quest 3S inspects the mutation in
-   3D and approves, rejects or defers it. The decision goes back to the agents.
-2. **The combination bench (next).** The scientist stacks several mutations into
-   one variant and sees the predicted effect update as they go, then proposes the
-   variant back to the agents. This turns the human from a reviewer into a
-   participant — they can steer the search, not just veto it.
+   candidate, the loop pauses until a human decides. The decision goes back to
+   the agents. This is the direction that earns the judging weight.
+2. **The console (built).** The scientist asks the lab a question out loud and
+   the answer builds the molecule in front of them — the structure redraws to
+   whatever the answer is about. This turns the human from a reviewer into a
+   participant: they steer what gets searched, not just veto it.
 
-The gate is the part that earns the judging weight. The bench is what makes the
-VR worth wearing.
+The gate is why the VR is in the architecture. The console is what makes it
+worth wearing.
 
 > Judging weights, for prioritization: 30% Omnigent orchestration, 25%
 > breakthrough potential, 20% discovery acceleration, 15% scientific rigor, 10%
@@ -53,10 +53,21 @@ before changing anything.
   is the JSON schema to register with Omnigent. Verified: agent blocked, VR
   decided, agent resumed.
 - **VR app** (`vr/`, three.js r186 + WebXR, Vite on `:5173`) — custom ATOM
-  parser, backbone tube coloured N→C, instanced atoms for the mutation and the
-  triad, dashed distance callout in Å, CanvasTexture panel, grip-grab /
-  stick-scale / trigger-pick, A/B/X decisions, auto-advance, "Waiting for
-  agents…" state. Desktop fallback: drag/scroll/click, `1` `2` `3` to decide.
+  parser, cartoon ribbon from P-SEA secondary structure, rotamer-rebuilt side
+  chains, liquid-glass CanvasTexture panels, grip-grab / stick-scale /
+  trigger-pick, head-relative layout with one-press recentre. Four surfaces:
+  **project** (left), **console** (below), **answer** (right), **control bar**
+  (top). Desktop fallback: drag a handle to move a surface, drag background to
+  orbit, click to press.
+- **The ask → answer → model loop** — a spoken question is transcribed by the
+  gate, wrapped in the format contract from `vr/src/prompt.ts`, and sent to the
+  lab. The reply's fenced JSON block is parsed into an `AgentResult`
+  (`vr/src/result.ts`) which drives both the answer panel's text and the
+  molecule. A reply with no JSON block says so on the panel rather than quietly
+  rendering nothing.
+- **Experiments** — `GET/POST/DELETE /experiments`, stored in
+  `gate/state/experiments.json`. An answer worth keeping is saved whole, so it
+  can be reopened later and rebuilt in 3D exactly as it was.
 - **Agent lab bridge** (`gate/bridge.py`) — consumes `WS /ws/explore` from the
   hack-databricks `ar_vr_bridge`, turns its nodes into candidates with real
   citations and computed validation, and relays decisions back to
@@ -105,63 +116,71 @@ before changing anything.
 
 ---
 
-## Where this is going: the combination bench
+## The combination bench — cut, and why
 
-**Goal:** the scientist selects positions on the protein, picks substitutions,
-stacks them into a candidate variant, and sees the predicted effect update
-immediately — then sends the variant to the agents.
+An earlier design had the reviewer stack mutations into a variant on a bench
+panel and watch an additive estimate update. **That is gone.** It was replaced
+by the console: the reviewer asks the lab a question in words, and the lab
+answers with a result that builds the molecule. The bench put the human in the
+role of a worse search algorithm; the console puts them in the role of the one
+asking what to search.
 
-### The scoring problem, and the honest answer
+The files are still on disk and unreferenced (`bench.ts`, `benchPanel.ts`,
+`residueCard.ts`, `panel.ts`, `logPanel.ts`, `metrics.ts`, `scan.ts`) in case
+any of it is wanted back. Nothing imports them.
 
-Running ESM-2 inline is impossible at 72–90 fps. So numbers come in three tiers,
-and **the UI must never blur them together**:
+**The tier discipline survives the cut and is not negotiable.** Every number
+carries where it came from:
 
 | Tier | What it is | Latency | How it's labelled in-world |
 |---|---|---|---|
 | `lookup` | Precomputed ESM-2 LLR for every single mutant (263 positions × 19 substitutions ≈ 5k values, one offline pass, ~100 KB JSON) | instant | plain number |
 | `estimate` | Additive sum of the single-mutant LLRs for a combination | instant | **"additive estimate — ignores epistasis"** |
 | `measured` | Real ESM-2 score of the full combined sequence, computed as a job | seconds | plain number, replaces the estimate when it lands |
+| `predicted` | A model said so, with no measurement behind it | — | **"model prediction"** |
 
-The additive estimate is *wrong in a specific, nameable way*: it assumes
-mutations don't interact. Saying so on the panel is worth more under "scientific
-rigor" than a prettier number would be. When the measured score arrives and
-disagrees with the estimate, **show both** — that gap is the interesting result,
-not an error to hide.
+An estimate is *wrong in a specific, nameable way*, and naming it is worth more
+under "scientific rigor" than a prettier number would be. `TIER_LABEL` in
+`vr/src/answerPanel.ts` is where each tier gets its words; an `estimate` reads
+"estimate · ignores interaction" and a `predicted` reads "model prediction".
+When a measured number arrives and disagrees with an estimate, **show both** —
+that gap is the interesting result, not an error to hide.
 
 ### Structural signals that are free and instant
 
-These come from the PDB with no model at all, and make the bench feel live:
+These come from the PDB with no model at all, and are what let the viewer check
+the lab rather than take its word:
 
-- **Distance to the active site** per mutation (already implemented).
-- **Epistasis risk** — if two selected positions are within ~8 Å of each other,
-  the additive estimate is least trustworthy. Flag the pair visually, draw the
-  line between them. This is the single highest-value addition: it tells the user
-  *when to distrust the fast number*.
-- **Burial** — count neighbours within 10 Å as a cheap proxy for buried vs
-  surface. Surface positions are the usual thermostability targets.
-- **Charge change** — substitutions that introduce a potential salt-bridge
-  partner within range of an existing opposite charge.
-
-Precompute the contact map (residue pairs within 8 Å) once from the PDB and
-serve it; it is a few thousand sparse pairs.
+- **Distance to the active site** per mutation (implemented, `gate/structure.py`).
+- **Wild-type check** — the structure is the authority on what residue is at a
+  position, so a claimed `wt` that disagrees is flagged (`wt_mismatch`).
+- **Disulfides** — detected from the file (SG–SG under 2.5 Å), never declared by
+  the backend. In 5XJH: Cys203–Cys239 (2.12 Å) and Cys273–Cys289 (2.05 Å).
+- **Secondary structure** — P-SEA from CA positions alone, used for the cartoon
+  and for `color: "secondary_structure"`. Gives 28% helix / 18% strand here,
+  which is what an α/β hydrolase should look like.
+- **Burial** — neighbours within 10 Å as a cheap proxy for buried vs surface.
 
 ### Interaction model in VR
 
-- **Select** a residue with the controller ray (picking already works).
-- **Substitute** via a radial menu of the 19 alternatives, each showing its
-  lookup LLR so the good ones are visible before committing.
-- **Stack** — chosen mutations become chips on a floating bench panel. Each chip
-  carries its own LLR; the stack shows the additive total and any epistasis-risk
-  pairs.
-- **Toggle** a chip off and on to A/B compare instantly. This is the core loop
-  of the bench and must stay under one frame.
-- **Score it for real** — one button fires the measured-tier job; the estimate
-  stays on screen until the real number replaces it.
-- **Propose to the agents** — sends the variant into the loop as a human-origin
-  candidate. This is the gate running in reverse and is the most valuable
-  demo beat: the human changes what the agents search next.
-- The gate inbox stays. From a flagged candidate, "load into bench" lets the
-  reviewer explore around the agent's proposal instead of only judging it.
+- **Ask** — hold the console button (or left Y) and speak. The transcript is
+  shown *before* anything is sent, so a misheard question can be discarded.
+- **Send** — the question goes to the lab wrapped in the format contract from
+  `vr/src/prompt.ts`. A bare question gets prose back, and prose renders as
+  nothing in the middle of the room.
+- **Read** — the answer panel opens brief and expands with *Review in depth*:
+  every metric with its tier, every citation with the sentence it rests on, and
+  a plain-language list of what the molecule was told to draw.
+- **Watch the molecule** — the structure repaints to the answer's `view`.
+  Highlights recolour the ribbon itself; side chains are drawn only where the
+  chemistry is the point. Never two models stacked on each other.
+- **Keep it** — *Save current answer* writes the whole result to the gate, so it
+  can be reopened later and rebuilt in 3D exactly as it was.
+- **Move anything** — every surface and the molecule carry a white grab bar.
+  Recentre puts the whole workspace back in front of you.
+- The gate stays. A flagged candidate lands in the run log and is decided with
+  `1` / `2` / `3` — thin, but losing the human's half of the loop is not an
+  option.
 
 ### Multiple enzymes
 
@@ -257,7 +276,7 @@ wrote.
 `decision` is one of `approve | reject | defer`. The reviewer comes from
 `?reviewer=` on the VR URL.
 
-### Variant (new — the bench)
+### Variant (designed, not built — kept for `POST /proposals`)
 
 ```json
 {
@@ -272,9 +291,10 @@ wrote.
 }
 ```
 
-`tier` is `estimate` or `measured` and **must survive into the UI** — a variant
-whose number came from addition may never render like one that came from the
-model.
+`tier` is `estimate` or `measured` and **must survive into the UI** — a number
+that came from addition may never render like one that came from the model.
+Nothing emits this shape today; it is the contract for sending a human-origin
+candidate back into the loop.
 
 ### Endpoints
 
@@ -287,6 +307,9 @@ model.
 | GET | `/decisions?run_id=` | audit trail for the research record | built |
 | GET | `/structures/{file}` | static PDB files | built |
 | GET | `/config` | protein registry, triad numbering | built |
+| GET | `/experiments` | saved experiments, newest first | built |
+| POST | `/experiments` | keep an answer in the project record | built |
+| DELETE | `/experiments/{id}` | drop one | built |
 | GET | `/scan?protein=&chain=` | precomputed single-mutant LLR matrix | **next** |
 | GET | `/contacts?protein=&chain=` | residue pairs within 8 Å | **next** |
 | POST | `/variants/score` | queue real scoring of a combination | **next** |
@@ -339,11 +362,18 @@ gate/
   data/petase.pdb      5XJH
   state/               candidates.json + decisions.json (audit trail, gitignored)
 vr/
-  src/main.ts          renderer, XR session, queue + decision flow
-  src/protein.ts       PDB parser → backbone tube + instanced atoms
-  src/highlight.ts     mutation / active site / distance callout / pick marker
-  src/panel.ts         in-world review panel (CanvasTexture)
-  src/input.ts         controller ray, grab/scale, A/B/X buttons
+  src/main.ts          renderer, XR session, layout, the ask → answer loop
+  src/prompt.ts        the format contract sent with every question + parser
+  src/result.ts        AgentResult — the one shape text and 3D both read
+  src/projectPanel.ts  left: questions / saved experiments / run log
+  src/console.ts       below: greeting, push-to-talk, send
+  src/answerPanel.ts   right: brief answer + review in depth
+  src/controlBar.ts    top: status and recentre
+  src/protein.ts       PDB parser → cartoon ribbon + side-chain sticks
+  src/rotamer.ts       rebuild a side chain as the residue it would become
+  src/highlight.ts     active site / labels / pick marker
+  src/input.ts         controller ray, grab/scale
+  src/voice.ts         record in the headset, transcribe on the gate
   src/api.ts           Gate API client
 dev.sh                 gate + vite + adb reverse, one command
 ```
@@ -366,7 +396,9 @@ route. Untethered: `cloudflared tunnel --url http://localhost:5173` plus
 adb via `adb tcpip 5555`.
 
 Only port 5173 needs forwarding — Vite proxies `/queue`, `/decisions`,
-`/structures`, `/config` to the gate, so there is one origin and no CORS.
+`/experiments`, `/structures`, `/config`, `/bridge` and `/voice` to the gate, so
+there is one origin and no CORS. **A new gate route needs adding to `paths` in
+`vr/vite.config.ts`**, or the dev server answers it with `index.html` and a 200.
 
 Iterate on desktop first with Meta's Immersive Web Emulator extension.
 
@@ -384,26 +416,28 @@ URL is what lets Databricks-hosted agents call the human gate.
 
 ## Milestones for the next session
 
-The gate is done. These build the bench, in order; stop where time runs out.
+The loop is closed: ask → lab → answer → molecule → saved experiment, with the
+gate still able to stop the agents. What is left, in order of what the demo
+gains:
 
-1. **Offline ESM-2 single-mutant scan** → `gate/data/scan_5XJH_A.json`, served
-   at `GET /scan`. Without this nothing else is real-time.
-2. **Contact map** → `GET /contacts`, for epistasis-risk flagging.
-3. **Bench panel in VR** — select a residue, radial substitution menu showing
-   per-substitution LLR, chips accumulate, additive total displayed **and
-   labelled as an estimate**.
-4. **Epistasis risk** — highlight close pairs, draw the line, warn on the panel.
-5. **Toggle chips on/off** for instant A/B comparison. Must stay within a frame.
-6. **`POST /variants/score`** — real combined scoring, estimate swaps to measured
-   when it lands, both shown if they disagree.
-7. **`POST /proposals`** — send the variant into the agent loop. This closes the
-   human→agent direction and is the demo's strongest beat.
-8. Polish: load-from-gate into bench, multiple enzymes, variant history.
+1. **Make the lab answer in the contract.** `vr/src/prompt.ts` is sent with
+   every question, but nothing on the lab side enforces it. Until a real reply
+   comes back with a JSON block, the answer panel falls back to prose and says
+   so. This is the one thing that turns the whole thing on.
+2. **Reopen a saved experiment in 3D** — the result is stored whole, the
+   rebuild path exists; it needs a pass with real saved data.
+3. **A flagged candidate deserves better than a keypress.** A small approve /
+   reject / defer strip on the console when the queue is non-empty.
+4. **`POST /proposals`** — let the reviewer send a result back as a
+   human-origin candidate. The strongest remaining beat: the human changes what
+   the agents search next.
+5. **Multiple enzymes.** `CONFIG` becomes a registry keyed by protein so LCC and
+   MHETase can be added. **Active-site numbering must be re-verified against
+   each new PDB file** — only IsPETase/5XJH is verified today.
 
-**Cut list if behind:** multiple enzymes → variant history → measured tier (ship
-estimate-only, clearly labelled) → radial menu (fall back to a fixed shortlist of
-substitutions per position). **Never cut** the gate decisions (built) or
-`POST /proposals` — those are the two directions of the loop.
+**Cut list if behind:** multiple enzymes → reopening experiments in 3D → the
+console decision strip. **Never cut** the gate decisions or the format contract
+travelling with the question — those are the two directions of the loop.
 
 ---
 

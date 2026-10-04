@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
-    <title>PETase Lab — VR Approval Gate</title>
+    <title>PETase Lab — VR</title>
     <style>
       :root { color-scheme: light; }
       * { box-sizing: border-box; }
@@ -28,7 +28,12 @@
         border-radius: 14px;
         backdrop-filter: blur(10px) saturate(1.15);
       }
-      #hud h1 { margin: 0 0 6px; font-size: 13px; letter-spacing: 0.06em; text-transform: uppercase; color: #06707f; }
+      #hud h1 { margin: 0 0 6px; font-size: 13px; letter-spacing: 0.06em; text-transform: uppercase; color: #06707f; cursor: pointer; }
+      /* The help text sits over the project panel on a short desktop window;
+         clicking the title folds it away. */
+      #hud h1::after { content: " ▾"; opacity: 0.5; }
+      #hud.collapsed h1::after { content: " ▸"; }
+      #hud.collapsed p:not(#status):not(#queue-line) { display: none; }
       #hud p { margin: 4px 0; font-size: 12px; color: #3a5569; }
       #hud kbd {
         padding: 1px 5px; border: 1px solid rgba(40, 66, 90, 0.35); border-radius: 4px;
@@ -49,36 +54,43 @@
   </head>
   <body>
     <div id="hud">
-      <h1>PETase Lab — Approval Gate</h1>
+      <h1>PETase Lab — VR</h1>
       <p id="status">booting…</p>
       <p id="queue-line"></p>
       <p>
         Hands: pinch a <b>white bar</b> = move that surface · pinch anything else =
-        pick / press · <b>⟳ RECENTER WORKSPACE</b> on the top bar re-places everything
+        pick / press · <b>⟳ Recenter</b> on the top bar re-places everything
       </p>
       <p>
         Controllers: trigger = same as pinch · grip = pick up anything you point at ·
         stick = scale what you hold · stick click = recenter ·
-        <b>left Y = hold to ask</b><br />
-        <kbd>A</kbd> approve · <kbd>B</kbd> reject · <kbd>X</kbd> defer
+        <b>left Y = hold to ask</b>
       </p>
       <p>
         Desktop: drag a <b>handle bar</b> = move that surface · drag background = orbit ·
         scroll = zoom · click = pick / press<br />
-        <kbd>1</kbd>/<kbd>2</kbd>/<kbd>3</kbd> decide · <kbd>b</kbd> load into bench ·
-        <kbd>p</kbd> propose · <kbd>r</kbd> reset layout · <kbd>v</kbd> hold to ask ·
-        <kbd>esc</kbd> close card
+        <kbd>v</kbd> hold to ask · <kbd>←</kbd>/<kbd>→</kbd> step answers ·
+        <kbd>d</kbd> review in depth · <kbd>s</kbd> save · <kbd>r</kbd> reset layout ·
+        <kbd>1</kbd>/<kbd>2</kbd>/<kbd>3</kbd> approve / reject / defer a flagged candidate
       </p>
       <p>
-        Pick a residue → substitutions appear on the bench card below the protein →
-        chips stack on the right. The additive total is an estimate; close pairs are
-        flagged.
+        Ask on the console below the protein. The question is sent with the format
+        contract the lab must answer in; the answer lands on the right and builds the
+        molecule. Keep one with <b>Save current answer</b>.
       </p>
     </div>
     <button id="enter-xr" disabled>checking XR…</button>
     <script>
       if (new URLSearchParams(location.search).get("passthrough") === "1")
         document.body.classList.add("passthrough");
+      const hud = document.getElementById("hud");
+      // Kept across reloads so a hot-reload during iteration does not unfold it
+      // back over the project panel.
+      if (sessionStorage.getItem("hud") === "collapsed") hud.classList.add("collapsed");
+      hud.querySelector("h1").addEventListener("click", () => {
+        const collapsed = hud.classList.toggle("collapsed");
+        sessionStorage.setItem("hud", collapsed ? "collapsed" : "open");
+      });
     </script>
     <script type="module" src="/src/main.ts"></script>
   </body>

@@ -1,45 +1,35 @@
 /**
  * The wide strip above the workspace.
  *
- * Carries the controls that must stay reachable wherever everything else has
- * been dragged to: recentring, push-to-talk, and sending a transcript to the
- * agent lab.
+ * Status and recovery only. It says who is reviewing, what the lab is doing,
+ * and gives back the one control that must stay reachable however far the other
+ * surfaces have been dragged: recentring.
  *
- * Laid out as rows rather than one line of competing elements. Text and buttons
- * previously shared a row, so a long headline ran underneath them; now the text
- * owns the upper rows, the buttons own the lower one, and every string is
- * clipped to the width actually available rather than trusted to fit.
+ * Push-to-talk used to live here and now lives on the console below the
+ * molecule, where asking a question actually happens.
  */
 
 import { CanvasPanel, THEME, font } from "./ui";
 
 const W = 1600;
-const H = 230;
+const H = 184;
 const PANEL_WIDTH_M = 1.05;
 
 const PAD = 48;
 const TEXT_X = 330;
 
-export type VoiceUiState = "idle" | "recording" | "sending" | "error";
-
 export interface ControlBarState {
   /** Short description of what the loop is doing right now. */
   headline: string;
-  queueTotal: number;
-  benchCount: number;
   reviewer: string;
+  /** Questions asked this session. */
+  asked: number;
+  /** Experiments kept. */
+  saved: number;
   /** 0-1 while the agent lab is mid-exploration; null when idle. */
   progress: number | null;
-  voice: {
-    state: VoiceUiState;
-    /** False when the gate has no transcription key — the control greys out. */
-    available: boolean;
-    /** Last transcript, waiting to be sent. */
-    lastText: string;
-    lastError: string | null;
-    /** True while the transcript is being handed to the lab. */
-    sending: boolean;
-  };
+  /** True when every link in the project panel's log is up. */
+  connected: boolean;
 }
 
 export class ControlBar extends CanvasPanel {
@@ -62,98 +52,49 @@ export class ControlBar extends CanvasPanel {
     ctx.fillText(`reviewer ${state.reviewer}`, PAD, 92);
 
     // ------------------------------------------- what the loop is doing
-    const textWidth = W - TEXT_X - PAD;
+    const recenterW = 240;
+    const buttonX = W - PAD - recenterW;
+    const textWidth = buttonX - TEXT_X - 32;
+
     ctx.fillStyle = THEME.text;
     ctx.font = font(600, 28);
     ctx.fillText(this.clip(state.headline, textWidth), TEXT_X, 58);
 
+    ctx.fillStyle = state.connected ? THEME.good : THEME.caution;
+    ctx.beginPath();
+    ctx.arc(TEXT_X + 7, 85, 7, 0, Math.PI * 2);
+    ctx.fill();
+
     ctx.fillStyle = THEME.faint;
     ctx.font = font(600, 22);
     ctx.fillText(
-      `${state.queueTotal} pending · ${state.benchCount} on the bench`,
-      TEXT_X,
+      `${state.asked} asked · ${state.saved} saved${state.connected ? "" : " · a link is down, see the log"}`,
+      TEXT_X + 26,
       92,
     );
 
     // Progress of the live exploration. The lab takes 9-13 s; showing the stage
     // advance is the difference between a demo and a frozen panel.
     if (state.progress != null) {
-      const barW = 620;
+      const barW = Math.min(620, textWidth);
       ctx.fillStyle = THEME.surface;
-      this.roundRect(TEXT_X, 108, barW, 8, 4);
+      this.roundRect(TEXT_X, 110, barW, 8, 4);
       ctx.fill();
       ctx.fillStyle = THEME.accent;
-      this.roundRect(TEXT_X, 108, Math.max(8, barW * state.progress), 8, 4);
+      this.roundRect(TEXT_X, 110, Math.max(8, barW * state.progress), 8, 4);
       ctx.fill();
     }
 
-    // --------------------------------------------------- buttons, bottom
-    const v = state.voice;
-    const row = H - PAD - 62;
-    const gap = 16;
-    const askW = 300;
-    const sendW = 300;
-    const recenterW = 240;
-    let x = W - PAD - recenterW;
-
-    this.button("gate:recenter", x, row, recenterW, 62, "⟳  Recenter", THEME.accent, {
-      fontSize: 24,
-    });
-
-    // Sending is explicit: the transcript is visible first, so a misheard
-    // question can be discarded instead of silently becoming the next query.
-    x -= gap + sendW;
-    const canSend = !!v.lastText && !v.sending;
     this.button(
-      "voice:send",
-      x,
-      row,
-      sendW,
+      "gate:recenter",
+      buttonX,
+      H - PAD - 54,
+      recenterW,
       62,
-      v.sending ? "Sending…" : "Send to lab  ➤",
-      THEME.bench,
-      { fontSize: 24, solid: canSend, disabled: !canSend },
+      "⟳  Recenter",
+      THEME.accent,
+      { fontSize: 24 },
     );
-
-    x -= gap + askW;
-    const askLabel =
-      v.state === "recording"
-        ? "● Listening"
-        : v.state === "sending"
-          ? "Transcribing…"
-          : v.available
-            ? "🎤 Hold to ask"
-            : "🎤 No voice key";
-    this.button(
-      "voice:toggle",
-      x,
-      row,
-      askW,
-      62,
-      askLabel,
-      v.state === "recording" ? THEME.warn : THEME.bench,
-      {
-        fontSize: 23,
-        solid: v.state === "recording",
-        disabled: !v.available || v.state === "sending",
-      },
-    );
-
-    // ------------------------------------------- transcript, above the row
-    // Clipped to the space left of the buttons so it can never run under them.
-    const statusWidth = x - PAD - 24;
-    if (v.lastError) {
-      ctx.fillStyle = THEME.warnText;
-      ctx.font = font(600, 21);
-      ctx.fillText(this.clip(v.lastError, statusWidth), PAD, row - 18);
-    } else if (v.lastText) {
-      ctx.fillStyle = THEME.faint;
-      ctx.font = font(600, 21);
-      ctx.fillText("heard", PAD, row - 18);
-      ctx.fillStyle = THEME.text;
-      ctx.font = font(700, 22);
-      ctx.fillText(this.clip(`“${v.lastText}”`, statusWidth - 72), PAD + 72, row - 18);
-    }
 
     this.commit();
   }

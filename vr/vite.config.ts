@@ -9,6 +9,7 @@ const paths = [
   "/queue",
   "/candidates",
   "/decisions",
+  "/experiments",
   "/structures",
   "/config",
   "/health",

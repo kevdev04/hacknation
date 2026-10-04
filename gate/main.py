@@ -45,6 +45,7 @@ DATA = BASE / "data"
 STATE = BASE / "state"
 CANDIDATES_FILE = STATE / "candidates.json"
 DECISIONS_FILE = STATE / "decisions.json"
+EXPERIMENTS_FILE = STATE / "experiments.json"
 
 # Catalytic triad of IsPETase as numbered in 5XJH chain A (verified against
 # data/petase.pdb: S160, D206, H237). Backend config — never hardcode in the
@@ -383,6 +384,66 @@ def bridge_explore(request: ExploreRequest) -> dict:
     )
     _runs[run.query_id] = run
     return {"ok": True, "query_id": run.query_id, "stage": run.stage}
+
+
+# ----------------------------------------------------------- experiments
+
+
+class Experiment(BaseModel):
+    """A question and the answer worth keeping.
+
+    Saved deliberately by the reviewer, so the project record is what a human
+    judged worth keeping rather than everything that was ever asked.
+    """
+
+    experiment_id: str = ""
+    query: str
+    query_id: str | None = None
+    headline: str = ""
+    kind: str = ""
+    # The whole AgentResult, so an experiment can be reopened and rebuilt in 3D
+    # exactly as it was, not just read as text.
+    result: dict[str, Any] | None = None
+    note: str | None = None
+    saved_by: str = "unknown"
+    saved_at: str | None = None
+
+
+def load_experiments() -> list[dict]:
+    return _read(EXPERIMENTS_FILE, [])
+
+
+@app.get("/experiments")
+def get_experiments(saved_by: str | None = None) -> dict:
+    items = load_experiments()
+    if saved_by:
+        items = [e for e in items if e.get("saved_by") == saved_by]
+    items.sort(key=lambda e: e.get("saved_at") or "", reverse=True)
+    return {"count": len(items), "experiments": items}
+
+
+@app.post("/experiments")
+def save_experiment(experiment: Experiment) -> dict:
+    record = experiment.model_dump()
+    record["saved_at"] = record.get("saved_at") or _now()
+    if not record.get("experiment_id"):
+        record["experiment_id"] = f"exp-{len(load_experiments()) + 1:03d}"
+    with _lock:
+        items = load_experiments()
+        items.append(record)
+        _write(EXPERIMENTS_FILE, items)
+    return {"ok": True, "experiment": record}
+
+
+@app.delete("/experiments/{experiment_id}")
+def delete_experiment(experiment_id: str) -> dict:
+    with _lock:
+        items = load_experiments()
+        kept = [e for e in items if e.get("experiment_id") != experiment_id]
+        if len(kept) == len(items):
+            raise HTTPException(404, f"no experiment {experiment_id}")
+        _write(EXPERIMENTS_FILE, kept)
+    return {"ok": True, "removed": experiment_id, "remaining": len(kept)}
 
 
 # ---------------------------------------------------------------- voice
