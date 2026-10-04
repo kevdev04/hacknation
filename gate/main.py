@@ -506,6 +506,11 @@ def bridge_runs() -> dict:
     return {"count": len(runs), "runs": runs}
 
 
+import lab  # noqa: E402  pre-loaded use cases and question history (/lab/*)
+
+app.include_router(lab.make_router(CONFIG, _accept_candidate, _runs))
+
+
 if __name__ == "__main__":
     import uvicorn
 

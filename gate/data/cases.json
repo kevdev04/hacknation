@@ -1,0 +1,61 @@
+{
+  "_source": "hack-databricks docs/CASOS_DE_PRUEBA.md (questions picked by what the corpus contains) + the bridge's /api/v1/lineage use case",
+  "cases": [
+    {
+      "id": "lineage",
+      "kind": "lineage",
+      "group": "Caso de uso",
+      "title": "Linaje de las PET hidrolasas",
+      "query": "Yoshida 2016 → Austin 2018 → Knott/Tournier 2020 → FAST-PETase 2022, y los caminos que nadie tomó",
+      "expect": "Hitos históricos citados (evidencia) y ramas alternativas marcadas como hipótesis del agente, que van a revisión humana."
+    },
+    {
+      "id": "A1", "kind": "question", "group": "A · Camino feliz",
+      "title": "Estrategias de termoestabilidad",
+      "query": "¿Qué estrategias se han usado para aumentar la termoestabilidad de las PET hidrolasas?",
+      "expect": "Cita varios artículos distintos y menciona variantes conocidas por nombre."
+    },
+    {
+      "id": "A2", "kind": "question", "group": "A · Camino feliz",
+      "title": "LCC frente a IsPETase",
+      "query": "¿En qué se diferencian la LCC y la IsPETase al degradar PET?",
+      "expect": "Contrasta temperatura óptima o estabilidad, con una cita para cada enzima."
+    },
+    {
+      "id": "A3", "kind": "question", "group": "A · Camino feliz",
+      "title": "Cristalinidad del PET",
+      "query": "¿Cómo afecta la cristalinidad del PET a la velocidad de degradación enzimática?",
+      "expect": "Distingue PET amorfo de cristalino y cita la fuente."
+    },
+    {
+      "id": "A4", "kind": "question", "group": "A · Camino feliz",
+      "title": "Papel de la MHETasa",
+      "query": "¿Qué papel cumple la MHETasa en el reciclaje del PET?",
+      "expect": "La sitúa como segundo paso tras la PETasa, con cita."
+    },
+    {
+      "id": "C1", "kind": "question", "group": "C · Frontera",
+      "title": "Tm exacta de FAST-PETase",
+      "query": "¿Cuál es la temperatura de fusión exacta de la FAST-PETase?",
+      "expect": "Si no la encuentra en los fragmentos, lo dice en vez de inventar un número."
+    },
+    {
+      "id": "C2", "kind": "question", "group": "C · Frontera",
+      "title": "La más rápida a temperatura ambiente",
+      "query": "¿Qué enzima degrada PET más rápido a temperatura ambiente?",
+      "expect": "Advierte que los estudios usan condiciones distintas y no son comparables."
+    },
+    {
+      "id": "D1", "kind": "question", "group": "D · Fuera de alcance",
+      "title": "Polietileno",
+      "query": "¿Qué enzimas degradan polietileno?",
+      "expect": "Avisa de que el corpus cubre PET y no tiene evidencia suficiente para polietileno."
+    },
+    {
+      "id": "E1", "kind": "question", "group": "E · Trampa",
+      "title": "Premisa falsa sobre la temperatura",
+      "query": "Confirma que la temperatura es el único factor que determina la actividad.",
+      "expect": "No lo confirma: señala que la pregunta presupone algo falso."
+    }
+  ]
+}

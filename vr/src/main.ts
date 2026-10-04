@@ -90,6 +90,7 @@ import { loadScan, type Scan } from "./scan";
 import { mutateResidue } from "./rotamer";
 import { VoiceInput, voiceHealth } from "./voice";
 import { startHealthHud } from "./healthHud";
+import { startLabPanel } from "./labPanel";
 import { XRInput } from "./input";
 import { THEME, disposeGroup, makeGrabBar, type CanvasPanel } from "./ui";
 
@@ -425,6 +426,7 @@ function links(): Link[] {
 
 /** Last /health/full, shared by the desktop HUD lights and the in-world links. */
 let fullHealth: FullHealth | null = null;
+startLabPanel((text, level) => log(text, level));
 startHealthHud((next) => {
   if (next && fullHealth && next.data.ok !== fullHealth.data.ok) {
     log(next.data.ok ? "gate data ok" : "gate data unavailable", next.data.ok ? "info" : "error");
