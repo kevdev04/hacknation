@@ -1,0 +1,29 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "petase-lab",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-04",
+  "observability": { "enabled": true },
+
+  // Built by `npm run build:vr`. Unmatched paths fall through to the Worker,
+  // which forwards them to the gate container.
+  "assets": {
+    "directory": "../vr/dist"
+  },
+
+  "containers": [
+    {
+      "class_name": "GateContainer",
+      "image": "../gate/Dockerfile",
+      "image_build_context": "../gate",
+      "instance_type": "basic",
+      "max_instances": 1
+    }
+  ],
+  "durable_objects": {
+    "bindings": [{ "name": "GATE", "class_name": "GateContainer" }]
+  },
+  "exports": {
+    "GateContainer": { "type": "durable-object", "storage": "sqlite" }
+  }
+}
