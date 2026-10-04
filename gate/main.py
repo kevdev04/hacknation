@@ -104,6 +104,9 @@ class Candidate(BaseModel):
     status: str = "pending_review"
     enqueued_at: str | None = None
     # Populated when the candidate came from the agent lab bridge.
+    # A name the reviewer gave it, so a hypothesis can be referred to by
+    # something other than the lab's own 48-character label.
+    label: str | None = None
     source: str = "mock"
     claim: dict[str, Any] | None = None
     validation: dict[str, Any] | None = None
@@ -112,7 +115,9 @@ class Candidate(BaseModel):
 
 class Decision(BaseModel):
     candidate_id: str
-    decision: Literal["approve", "reject", "defer"]
+    # "dismiss" is housekeeping, not science: it clears the queue without
+    # claiming anything about the candidate. Still logged.
+    decision: Literal["approve", "reject", "defer", "dismiss"]
     note: str | None = None
     reviewer: str = "unknown"
     timestamp: str | None = None
@@ -253,6 +258,7 @@ def post_decision(decision: Decision) -> dict:
         "approve": "approved",
         "reject": "rejected",
         "defer": "deferred",
+        "dismiss": "dismissed",
     }
     with _lock:
         items = load_candidates()
@@ -295,6 +301,25 @@ def post_decision(decision: Decision) -> dict:
 
     remaining = sum(1 for c in items if c["status"] == "pending_review")
     return {"ok": True, "decision": record, "pending_remaining": remaining}
+
+
+class LabelPatch(BaseModel):
+    label: str
+
+
+@app.post("/candidates/{candidate_id}/label")
+def set_label(candidate_id: str, patch: LabelPatch) -> dict:
+    """Name a candidate. Renaming is not a decision and is not logged as one —
+    it only changes how the thing is referred to."""
+    name = patch.label.strip()[:80]
+    with _lock:
+        items = load_candidates()
+        target = next((c for c in items if c["candidate_id"] == candidate_id), None)
+        if target is None:
+            raise HTTPException(404, f"no candidate {candidate_id}")
+        target["label"] = name or None
+        save_candidates(items)
+    return {"ok": True, "candidate_id": candidate_id, "label": target["label"]}
 
 
 @app.get("/decisions")

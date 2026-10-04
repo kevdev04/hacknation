@@ -135,7 +135,9 @@ export function buildHighlights(
 
   // Active site: second colour, full atoms, labelled with residue identity.
   if (siteResidues.length > 0) {
-    group.add(buildResidueSticks(siteResidues, { color: COLOR_ACTIVE_SITE }));
+    group.add(
+      buildResidueSticks(siteResidues, { color: COLOR_ACTIVE_SITE, sideChainOnly: true }),
+    );
     for (const res of siteResidues) {
       const c = residueCentroid(res);
       group.add(halo(c, COLOR_ACTIVE_SITE, 2.4));
@@ -156,11 +158,9 @@ export function buildHighlights(
   if (mutated) {
     wtMismatch = oneLetter(mutated.resName) !== opts.expectedWt;
 
-    group.add(buildResidueSticks([mutated], {
-      color: COLOR_MUTATION,
-      atomRadius: 0.34,
-      bondRadius: 0.15,
-    }));
+    group.add(
+      buildResidueSticks([mutated], { color: COLOR_MUTATION, sideChainOnly: true }),
+    );
     const c = residueCentroid(mutated);
     group.add(halo(c, COLOR_MUTATION, 3.4));
 
@@ -317,11 +317,7 @@ export function buildBenchOverlay(
 
   if (enabled.length > 0) {
     group.add(
-      buildResidueSticks(enabled, {
-        color: COLOR_BENCH,
-        atomRadius: 0.3,
-        bondRadius: 0.13,
-      }),
+      buildResidueSticks(enabled, { color: COLOR_BENCH, sideChainOnly: true }),
     );
   }
 

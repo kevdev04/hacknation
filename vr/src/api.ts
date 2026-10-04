@@ -40,6 +40,8 @@ export interface Candidate {
   /** "mutation" is measured against the PDB; "claim" has no residue. */
   kind: "mutation" | "claim";
   source: string;
+  /** A name the reviewer gave it, shown instead of the lab's own label. */
+  label?: string | null;
   claim?: Claim | null;
   validation?: Validation | null;
   approval_id?: string | null;
@@ -57,7 +59,8 @@ export interface Candidate {
   status: string;
 }
 
-export type DecisionKind = "approve" | "reject" | "defer";
+/** "dismiss" clears the queue without claiming anything about the science. */
+export type DecisionKind = "approve" | "reject" | "defer" | "dismiss";
 
 const REVIEWER =
   new URLSearchParams(location.search).get("reviewer") ?? "unknown";
@@ -210,4 +213,16 @@ export interface BridgeHealth {
 /** Is the agent lab bridge actually answering, and at which URL. */
 export function getBridgeHealth(): Promise<BridgeHealth> {
   return json("/bridge/health");
+}
+
+/** Name a candidate. Not a decision, and not written to the audit trail. */
+export function setLabel(candidate_id: string, label: string) {
+  return json<{ ok: boolean; label: string | null }>(
+    `/candidates/${encodeURIComponent(candidate_id)}/label`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ label }),
+    },
+  );
 }

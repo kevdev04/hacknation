@@ -16,6 +16,7 @@
  */
 
 import {
+  ACESFilmicToneMapping,
   AmbientLight,
   BufferAttribute,
   BufferGeometry,
@@ -28,6 +29,7 @@ import {
   HemisphereLight,
   Line,
   LineBasicMaterial,
+  LineDashedMaterial,
   Object3D,
   PerspectiveCamera,
   Plane,
@@ -47,6 +49,7 @@ import {
   getQueue,
   getStructure,
   postDecision,
+  setLabel,
   proposeVariant,
   reviewer,
   scoreVariant,
@@ -57,16 +60,26 @@ import {
   type GateConfig,
   type VariantPayload,
 } from "./api";
-import { buildBackbone, oneLetter, parsePDB, type Structure } from "./protein";
+import {
+  buildCartoon,
+  buildResidueSticks,
+  recolorCartoon,
+  closestAtomPair,
+  oneLetter,
+  parsePDB,
+  type Structure,
+} from "./protein";
 import {
   buildBenchOverlay,
   buildHighlights,
+  makeLabel,
   PickMarker,
   residueCentroid,
   type HighlightResult,
 } from "./highlight";
-import { ReviewPanel, type PanelState } from "./panel";
-import { BenchPanel } from "./benchPanel";
+import { ReviewPanel, type PanelState, type PanelTab } from "./panel";
+import { BenchPanel, type BenchTab } from "./benchPanel";
+import { RESULT_EXAMPLES, type AgentResult } from "./result";
 import { ControlBar } from "./controlBar";
 import { LogPanel, type Link, type LogEntry } from "./logPanel";
 import { ResidueCard, type SubstitutionRow } from "./residueCard";
@@ -105,17 +118,33 @@ renderer.xr.enabled = true;
 // Quest 3S has headroom to spare at 1.0 but not much; foveation keeps the
 // periphery cheap without touching the protein in the centre of view.
 renderer.xr.setFoveation(0.5);
+// ACES keeps the specular on a glossy ribbon from clipping to flat white,
+// which is most of what made the old tube read as plastic.
+renderer.toneMapping = ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.05;
 document.body.appendChild(renderer.domElement);
 
 const scene = new Scene();
 const camera = new PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.01, 50);
 camera.position.set(0, 1.5, 0.95);
 
-scene.add(new HemisphereLight(0xffffff, 0xaebecd, 1.0));
-scene.add(new AmbientLight(0xffffff, 0.35));
-const sun = new DirectionalLight(0xffffff, 1.1);
-sun.position.set(1.5, 3, 1.5);
-scene.add(sun);
+// Three-point lighting. A single sun plus ambient flattens a ribbon into a
+// silhouette; a key, a cool fill from the opposite side and a rim behind are
+// what make the depth of the fold readable.
+scene.add(new HemisphereLight(0xf4f9ff, 0x9fb3c6, 0.75));
+scene.add(new AmbientLight(0xffffff, 0.22));
+
+const key = new DirectionalLight(0xfff6ec, 1.25);
+key.position.set(1.6, 2.6, 1.8);
+scene.add(key);
+
+const fill = new DirectionalLight(0xcfe2ff, 0.55);
+fill.position.set(-2.0, 0.4, 1.0);
+scene.add(fill);
+
+const rim = new DirectionalLight(0xffffff, 0.7);
+rim.position.set(-0.6, 1.2, -2.2);
+scene.add(rim);
 
 // Desktop-only scenery; hidden the moment an XR session starts so passthrough
 // stays clean.
@@ -220,7 +249,7 @@ interface LayoutSlot {
 
 const layout: LayoutSlot[] = [
   { object: proteinGroup, right: 0, up: 0.02, forward: 1.15, yaw: 0, pitch: 0 },
-  { object: reviewPanel.group, right: -0.78, up: 0.12, forward: 1.15, yaw: 0.6, pitch: 0 },
+  { object: reviewPanel.group, right: -0.80, up: 0.10, forward: 1.18, yaw: 0.6, pitch: 0 },
   { object: benchPanel.group, right: 0.78, up: 0.12, forward: 1.15, yaw: -0.6, pitch: 0 },
   { object: residueCard.group, right: 0, up: -0.5, forward: 0.85, yaw: 0, pitch: -0.62 },
   // Raised until its grab handle clears the molecule labels: the handle hangs
@@ -389,21 +418,83 @@ function fullyConnected(): boolean {
 /** Newest unfinished exploration from the agent lab, if any. */
 let activeRun: BridgeRun | null = null;
 let voiceAvailable = false;
+/** Which field the next transcript fills. null = a question for the lab. */
+let voiceTarget: "label" | "note" | null = null;
+/** Captured by voice, attached to the next decision. */
+let pendingNote: string | null = null;
+/** Dismiss is armed and the next press commits. */
+let confirmingDismiss = false;
+/** Which view of the candidate the review panel is showing. */
+let panelTab: PanelTab = "summary";
+let panelScroll = 0;
+
+const SCROLL_STEP = 160;
+
+/** The right-hand panel: what you are building, or what came back. */
+let benchTab: BenchTab = "bench";
+/** Results available to step through. Seeded with the example set so every
+ * rendering path can be exercised before the backend sends anything. */
+let results: AgentResult[] = [...RESULT_EXAMPLES];
+let resultIndex = 0;
+
+function currentResult(): AgentResult | null {
+  return results[resultIndex] ?? null;
+}
 
 /** Push-to-talk. Repaints on every state change so the bar tracks it live. */
 const voice = new VoiceInput(() => repaint());
 
-async function beginVoice(): Promise<void> {
-  if (!voiceAvailable || !voice.supported) return;
+async function beginVoice(): Promise<boolean> {
+  if (!voiceAvailable || !voice.supported) return false;
   await voice.start();
-  if (voice.state === "recording") log("listening…");
+  const started = voice.state === "recording";
+  if (started) log("listening…");
+  return started;
 }
 
 async function endVoice(): Promise<void> {
   if (voice.state !== "recording") return;
+  const target = voiceTarget;
   const result = await voice.stopAndSend();
-  if (result?.ok) log(`heard: "${result.text}"`.slice(0, 70));
-  else if (voice.lastError) log(`voice: ${voice.lastError}`, "warn");
+
+  if (!result?.ok) {
+    if (voice.lastError) log(`voice: ${voice.lastError}`, "warn");
+    voiceTarget = null;
+    repaint();
+    return;
+  }
+
+  if (target === "label" && current) {
+    try {
+      await setLabel(current.candidate_id, result.text);
+      current.label = result.text;
+      log(`named ${current.candidate_id}: "${result.text}"`.slice(0, 70));
+    } catch (error) {
+      log(`rename failed: ${(error as Error).message}`, "error");
+    }
+    voice.lastText = "";
+  } else if (target === "note") {
+    pendingNote = result.text;
+    log(`note ready: "${result.text}"`.slice(0, 70));
+    voice.lastText = "";
+  } else {
+    log(`heard: "${result.text}"`.slice(0, 70));
+  }
+
+  voiceTarget = null;
+  repaint();
+}
+
+/** Start recording for a specific field rather than for a new question. */
+async function captureInto(target: "label" | "note"): Promise<void> {
+  if (!current) return;
+  if (voice.state === "recording") {
+    await endVoice();
+    return;
+  }
+  voiceTarget = target;
+  if (!(await beginVoice())) voiceTarget = null;
+  repaint();
 }
 
 /**
@@ -457,6 +548,11 @@ function panelState(): PanelState {
         : null,
     inBench:
       current && current.kind !== "claim" ? bench.has(current.mutation.pos) : false,
+    confirmingDismiss,
+    pendingNote,
+    voiceTarget,
+    tab: panelTab,
+    scroll: panelScroll,
     flash,
     message,
     reviewer,
@@ -504,6 +600,10 @@ function paintResidueCard(): void {
 function repaint(): void {
   reviewPanel.render(panelState());
   benchPanel.render({
+    tab: benchTab,
+    result: currentResult(),
+    resultIndex,
+    resultCount: results.length,
     bench,
     epistasis: currentEpistasis(),
     scan,
@@ -554,7 +654,7 @@ async function loadStructure(url: string, chain: string): Promise<LoadedStructur
   if (structure.residues.size === 0) {
     throw new Error(`no residues for chain ${chain} in ${url}`);
   }
-  const loaded = { structure, backbone: buildBackbone(structure) };
+  const loaded = { structure, backbone: buildCartoon(structure) };
   structureCache.set(key, loaded);
   return loaded;
 }
@@ -601,6 +701,140 @@ async function mountStructure(url: string, chain: string): Promise<Structure> {
   return structure;
 }
 
+/**
+ * Draw an AgentResult's `view` on the structure.
+ *
+ * The backend speaks in residues and roles; the mapping from role to colour
+ * lives here, so the contract stays stable while the visuals change. Mutations
+ * in the view are modelled on the real backbone like any other, so a proposed
+ * substitution is shown as the residue it would become.
+ */
+let resultOverlay: Group | null = null;
+
+const ROLE_COLOR: Record<string, number> = {
+  mutation: 0x2461c4,
+  active_site: 0x0d8277,
+  focus: 0xd1820a,
+  risk: 0xc2384b,
+  support: 0x116a4f,
+  neutral: 0x5f7488,
+};
+
+function applyResultView(result: AgentResult | null): void {
+  if (resultOverlay) {
+    proteinGroup.remove(resultOverlay);
+    disposeGroup(resultOverlay);
+    resultOverlay = null;
+  }
+  const backbone = proteinGroup.children.find((c) => c.name === "backbone") as
+    | Group
+    | undefined;
+
+  const view = result?.view;
+  if (!currentStructure || !view) {
+    if (backbone) recolorCartoon(backbone, new Map());
+    repaint();
+    return;
+  }
+
+  const group = new Group();
+  group.name = "result-overlay";
+
+  // Substitutions become real side chains, not just coloured spheres.
+  const modelled = (view.mutations ?? [])
+    .map((m) => mutateResidue(currentStructure!, m.pos, m.mut))
+    .filter((r): r is NonNullable<typeof r> => !!r && !r.failed)
+    .map((r) => r.residue);
+  if (modelled.length) {
+    group.add(
+      buildResidueSticks(modelled, {
+        color: ROLE_COLOR.mutation,
+        sideChainOnly: true,
+      }),
+    );
+  }
+
+  // Highlights repaint the ribbon itself. Drawing a second representation over
+  // the cartoon was what made a result look like two models fighting rather
+  // than one molecule responding.
+  const repaintMap = new Map<number, Color>();
+  const mutated = new Set((view.mutations ?? []).map((m) => m.pos));
+
+  for (const h of view.highlights ?? []) {
+    const color = new Color(ROLE_COLOR[h.role] ?? ROLE_COLOR.neutral);
+    const residues = h.residues
+      .map((pos) => currentStructure!.residues.get(pos))
+      .filter((r): r is NonNullable<typeof r> => !!r);
+    if (residues.length === 0) continue;
+
+    for (const res of residues) repaintMap.set(res.resSeq, color);
+
+    // The catalytic triad and anything the reviewer must judge chemically keep
+    // their side chains drawn; a whole highlighted loop does not need 6 of them.
+    // A highlight may override that with `style`.
+    const defaultSticks =
+      h.role === "active_site" || h.role === "risk" || residues.length <= 2;
+    const wantsSticks = h.style ? h.style !== "ribbon" : defaultSticks;
+    if (h.style === "sticks") for (const res of residues) repaintMap.delete(res.resSeq);
+    if (wantsSticks) {
+      const drawable = residues.filter((r) => !mutated.has(r.resSeq));
+      if (drawable.length) {
+        group.add(
+          buildResidueSticks(drawable, { color: color.getHex(), sideChainOnly: true }),
+        );
+      }
+    }
+
+    if (h.label) {
+      const centre = residueCentroid(residues[Math.floor(residues.length / 2)]);
+      const label = makeLabel(h.label, color.getHex(), 2.6);
+      label.position.copy(centre).add(new Vector3(0, 4.6, 0));
+      group.add(label);
+    }
+  }
+
+  for (const link of view.links ?? []) {
+    const a = currentStructure.residues.get(link.from);
+    const b = currentStructure.residues.get(link.to);
+    if (!a || !b) continue;
+    const pair = closestAtomPair(a, b);
+    if (!pair) continue;
+    const color = ROLE_COLOR[link.role ?? "neutral"] ?? ROLE_COLOR.neutral;
+    const line = new Line(
+      new BufferGeometry().setFromPoints([pair.a, pair.b]),
+      new LineDashedMaterial({
+        color,
+        dashSize: 0.45,
+        gapSize: 0.35,
+        transparent: true,
+        opacity: 0.95,
+      }),
+    );
+    line.computeLineDistances();
+    group.add(line);
+    if (link.label) {
+      const mid = pair.a.clone().add(pair.b).multiplyScalar(0.5);
+      const label = makeLabel(link.label, color, 1.7);
+      label.position.copy(mid).add(new Vector3(0, 1.8, 0));
+      group.add(label);
+    }
+  }
+
+  if (backbone) recolorCartoon(backbone, repaintMap);
+  proteinGroup.add(group);
+  resultOverlay = group;
+
+  if (view.focus != null) {
+    const res = currentStructure.residues.get(view.focus);
+    if (res) {
+      pickedPos = res.resSeq;
+      pickedCentroid = residueCentroid(res);
+      pickMarker.show(res);
+    }
+  }
+  repaint();
+}
+
 function rebuildBenchOverlay(): void {
   if (benchOverlay) {
     proteinGroup.remove(benchOverlay);
@@ -629,6 +863,10 @@ function rebuildBenchOverlay(): void {
 }
 
 async function showCandidate(candidate: Candidate | null): Promise<void> {
+  if (candidate?.candidate_id !== current?.candidate_id) {
+    panelScroll = 0;
+    confirmingDismiss = false;
+  }
   current = candidate;
 
   if (highlights) {
@@ -754,7 +992,9 @@ async function decide(decision: DecisionKind): Promise<void> {
   busy = true;
   const target = current;
   try {
-    await postDecision(target.candidate_id, decision);
+    await postDecision(target.candidate_id, decision, pendingNote ?? undefined);
+    pendingNote = null;
+    confirmingDismiss = false;
     log(`${decision} ${target.candidate_id}${target.approval_id ? " → relayed to lab" : ""}`);
     flash = { decision, label: `${target.mutation.label} · ${target.candidate_id}` };
     flashUntil = performance.now() + 1100;
@@ -928,12 +1168,39 @@ function pickProtein(raycaster: Raycaster): void {
 }
 
 function handleAction(id: string): void {
-  const [kind, value] = id.split(":");
+  const [kind, value, rest] = id.split(":");
   switch (kind) {
     case "gate":
+      if (value === "tab") {
+        panelTab = (rest as PanelTab) ?? "summary";
+        panelScroll = 0;
+        repaint();
+        return;
+      }
+      if (value === "scroll") {
+        const step = rest === "up" ? -SCROLL_STEP : SCROLL_STEP;
+        panelScroll = Math.min(
+          Math.max(panelScroll + step, 0),
+          reviewPanel.maxScroll,
+        );
+        repaint();
+        return;
+      }
       if (value === "bench") loadCandidateIntoBench();
       else if (value === "recenter") resetLayout();
-      else void decide(value as DecisionKind);
+      else if (value === "rename") void captureInto("label");
+      else if (value === "note") void captureInto("note");
+      else if (value === "dismiss") {
+        // First press arms it; it only commits on the second.
+        confirmingDismiss = true;
+        repaint();
+      } else if (value === "dismiss-confirm") {
+        confirmingDismiss = false;
+        void decide("dismiss");
+      } else {
+        confirmingDismiss = false;
+        void decide(value as DecisionKind);
+      }
       return;
     case "queue": {
       const found = queue.findIndex((c) => c.candidate_id === value);
@@ -967,6 +1234,20 @@ function handleAction(id: string): void {
         void beginVoice();
       }
       return;
+    case "benchtab":
+      benchTab = value as BenchTab;
+      if (benchTab === "result") applyResultView(currentResult());
+      repaint();
+      return;
+    case "result": {
+      if (results.length === 0) return;
+      const step = value === "prev" ? -1 : 1;
+      resultIndex = (resultIndex + step + results.length) % results.length;
+      applyResultView(currentResult());
+      log(`result case ${resultIndex + 1}/${results.length}: ${currentResult()?.kind}`);
+      repaint();
+      return;
+    }
     case "act":
       if (value === "clear") {
         bench.clear();
@@ -1196,8 +1477,10 @@ async function enterXR(mode: "immersive-ar" | "immersive-vr"): Promise<void> {
   const session = await navigator.xr!.requestSession(mode, {
     optionalFeatures: ["local-floor", "bounded-floor", "hand-tracking", "layers"],
   });
+  // No setReferenceSpaceType here: three already defaults to `local-floor`,
+  // and the call only takes effect before setSession — afterwards it warns
+  // "Cannot change reference space type while presenting" and does nothing.
   await renderer.xr.setSession(session);
-  renderer.xr.setReferenceSpaceType("local-floor");
 
   const passthrough = mode === "immersive-ar";
   scenery.visible = !passthrough;

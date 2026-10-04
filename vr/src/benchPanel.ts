@@ -13,6 +13,7 @@ import { MAX_MUTATIONS } from "./bench";
 import type { EpistasisPair } from "./metrics";
 import { EPISTASIS_CUTOFF_A } from "./metrics";
 import { scanCaption, type Scan } from "./scan";
+import type { AgentResult, Metric, Tier } from "./result";
 
 const W = 1024;
 const H = 1080;
@@ -22,7 +23,23 @@ const CHIP_H = 54;
 const CHIP_GAP = 7;
 const MAX_RISK_ROWS = 3;
 
+export type BenchTab = "bench" | "result";
+
+/** Where a number came from, spelled out rather than implied by styling. */
+const TIER_LABEL: Record<Tier, string> = {
+  measured: "measured",
+  estimate: "estimate · ignores epistasis",
+  lookup: "single-mutant scan",
+  predicted: "predicted",
+};
+
 export interface BenchPanelState {
+  tab: BenchTab;
+  /** The lab's answer to the last question, if one has come back. */
+  result: AgentResult | null;
+  /** Position in the example set, for stepping through test cases. */
+  resultIndex: number;
+  resultCount: number;
   bench: Bench;
   epistasis: EpistasisPair[];
   scan: Scan | null;
@@ -36,13 +53,45 @@ export class BenchPanel extends CanvasPanel {
   }
 
   render(state: BenchPanelState): void {
-    const ctx = this.ctx;
-    const { bench } = state;
     this.begin();
     this.backdrop();
+    const y = this.tabs(state, 70);
+    if (state.tab === "result") this.resultBody(state, y);
+    else this.benchBody(state, y);
+    this.commit();
+  }
 
-    // ---------------------------------------------------------- header
-    let y = 70;
+  /** Two views of the same surface: what you are building, and what came back. */
+  private tabs(state: BenchPanelState, y: number): number {
+    const ctx = this.ctx;
+    const gap = 10;
+    const tabW = (W - 88 - gap) / 2;
+    ([["bench", "Bench"], ["result", "Result"]] as const).forEach(([id, label], i) => {
+      const x = 44 + i * (tabW + gap);
+      const active = state.tab === id;
+      ctx.fillStyle = active ? THEME.tintBench : THEME.surface;
+      this.roundRect(x, y, tabW, 48, 10);
+      ctx.fill();
+      ctx.strokeStyle = active ? THEME.bench : THEME.rule;
+      ctx.lineWidth = active ? 3 : 2;
+      this.roundRect(x, y, tabW, 48, 10);
+      ctx.stroke();
+      ctx.fillStyle = active ? THEME.bench : THEME.dim;
+      ctx.font = font(active ? 700 : 600, 22);
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(label, x + tabW / 2, y + 25);
+      ctx.textAlign = "left";
+      ctx.textBaseline = "alphabetic";
+      this.region(`benchtab:${id}`, x, y, tabW, 48);
+    });
+    return y + 74;
+  }
+
+  private benchBody(state: BenchPanelState, startY: number): void {
+    const ctx = this.ctx;
+    const { bench } = state;
+    let y = startY;
     this.heading("Combination bench", 44, y, THEME.bench);
     ctx.textAlign = "right";
     ctx.fillStyle = THEME.faint;
@@ -215,8 +264,153 @@ export class BenchPanel extends CanvasPanel {
       44,
       H - 26,
     );
+  }
 
-    this.commit();
+
+  /**
+   * What the lab answered. Driven entirely by the AgentResult contract, so
+   * anything the backend can express shows up here without further changes.
+   */
+  private resultBody(state: BenchPanelState, startY: number): void {
+    const ctx = this.ctx;
+    const r = state.result;
+    let y = startY;
+    const width = W - 88;
+
+    // Step through the cases. Arrows live at the top so they are reachable
+    // whatever the body below happens to be.
+    const navW = 64;
+    this.button("result:prev", 44, y, navW, 48, "◀", THEME.dim, {
+      fontSize: 22,
+      disabled: state.resultCount < 2,
+    });
+    this.button("result:next", 44 + navW + 10, y, navW, 48, "▶", THEME.dim, {
+      fontSize: 22,
+      disabled: state.resultCount < 2,
+    });
+    ctx.fillStyle = THEME.faint;
+    ctx.font = font(600, 20);
+    ctx.fillText(
+      state.resultCount
+        ? `case ${state.resultIndex + 1} of ${state.resultCount}`
+        : "no result yet",
+      44 + navW * 2 + 28,
+      y + 31,
+    );
+    ctx.textAlign = "right";
+    ctx.fillText(r ? r.kind : "—", W - 44, y + 31);
+    ctx.textAlign = "left";
+    y += 74;
+
+    if (!r) {
+      ctx.fillStyle = THEME.dim;
+      ctx.font = font(600, 24);
+      this.wrap(
+        "Nothing has come back from the lab yet. Ask a question, or step through the example cases with the arrows to check how each kind of answer renders.",
+        44,
+        y + 10,
+        width,
+        34,
+      );
+      return;
+    }
+
+    if (r.query) {
+      ctx.fillStyle = THEME.faint;
+      ctx.font = font(600, 20);
+      y = this.wrap(`asked: "${r.query}"`, 44, y, width, 26, 2);
+      y += 12;
+    }
+
+    ctx.fillStyle = r.kind === "none" ? THEME.warnText : THEME.text;
+    ctx.font = font(700, 34);
+    y = this.wrap(r.headline, 44, y + 8, width, 42, 3);
+    y += 10;
+
+    if (r.agent_generated) {
+      this.heading("Agent hypothesis · not verified", 44, y, THEME.agent);
+      y += 32;
+    }
+
+    if (r.summary) {
+      ctx.fillStyle = THEME.body;
+      ctx.font = font(600, 23);
+      y = this.wrap(r.summary, 44, y, width, 31, 5);
+      y += 16;
+    }
+
+    if (r.metrics?.length) {
+      this.rule(y);
+      y += 34;
+      for (const m of r.metrics.slice(0, 6)) {
+        y = this.metricRow(m, y, width);
+      }
+      y += 8;
+    }
+
+    if (r.citations?.length) {
+      this.rule(y);
+      y += 34;
+      this.heading("Evidence", 44, y, THEME.faint);
+      y += 30;
+      for (const c of r.citations.slice(0, 2)) {
+        ctx.fillStyle = THEME.text;
+        ctx.font = font(600, 21);
+        y = this.wrap(c.title, 44, y, width, 27, 2);
+        ctx.fillStyle = THEME.faint;
+        ctx.font = font(600, 19);
+        y = this.wrap(`${c.doc_id}${c.year ? ` · ${c.year}` : ""}`, 44, y + 2, width, 24, 1);
+        y += 10;
+      }
+    }
+
+    // What the molecule is being told to show, stated rather than left implicit.
+    const view = r.view;
+    ctx.fillStyle = THEME.faint;
+    ctx.font = font(600, 19);
+    const shown = view
+      ? [
+          view.mutations?.length ? `${view.mutations.length} modelled` : null,
+          view.highlights?.length ? `${view.highlights.length} highlighted` : null,
+          view.links?.length ? `${view.links.length} linked` : null,
+          view.focus ? `focus ${view.focus}` : null,
+        ]
+          .filter(Boolean)
+          .join(" · ")
+      : "structure unchanged — nothing to show";
+    ctx.fillText(this.clipText(shown, width), 44, H - 26);
+  }
+
+  private metricRow(m: Metric, y: number, width: number): number {
+    const ctx = this.ctx;
+    ctx.fillStyle = m.warn ? THEME.warnText : THEME.dim;
+    ctx.font = font(600, 21);
+    ctx.fillText(this.clipText(m.k, width * 0.5), 44, y);
+
+    ctx.textAlign = "right";
+    ctx.fillStyle = m.warn ? THEME.warn : THEME.text;
+    ctx.font = font(700, 24);
+    ctx.fillText(m.v, W - 44, y);
+    ctx.textAlign = "left";
+    y += 24;
+
+    // The tier is part of the number, never implied by how it is drawn.
+    if (m.tier) {
+      ctx.textAlign = "right";
+      ctx.fillStyle = m.tier === "measured" ? THEME.good : THEME.caution;
+      ctx.font = font(600, 17);
+      ctx.fillText(TIER_LABEL[m.tier], W - 44, y);
+      ctx.textAlign = "left";
+    }
+    return y + 22;
+  }
+
+  private clipText(text: string, maxWidth: number): string {
+    const ctx = this.ctx;
+    if (maxWidth <= 0 || ctx.measureText(text).width <= maxWidth) return text;
+    let out = text;
+    while (out.length > 1 && ctx.measureText(`${out}…`).width > maxWidth) out = out.slice(0, -1);
+    return `${out}…`;
   }
 
   /** One mutation row: toggle target on the left, remove target on the right. */

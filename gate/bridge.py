@@ -33,6 +33,14 @@ import uuid
 from typing import Any, Callable, Iterable
 
 BRIDGE_URL = os.environ.get("BRIDGE_URL", "http://127.0.0.1:8010")
+# Databricks Apps sit behind OAuth and cannot be made public, so a deployed
+# bridge needs a bearer token on every call — including the WebSocket
+# handshake. Empty when the lab runs locally, where no auth is involved.
+BRIDGE_TOKEN = os.environ.get("BRIDGE_TOKEN", "").strip()
+
+
+def auth_headers() -> dict[str, str]:
+    return {"Authorization": f"Bearer {BRIDGE_TOKEN}"} if BRIDGE_TOKEN else {}
 
 # Mutations as written in the literature: S121E, D186H, R280A.
 MUTATION_RE = re.compile(r"\b([ACDEFGHIKLMNPQRSTVWY])(\d{1,4})([ACDEFGHIKLMNPQRSTVWY])\b")
@@ -195,7 +203,11 @@ async def stream_run(
     import websockets
 
     try:
-        async with websockets.connect(ws_url(), open_timeout=10) as ws:
+        async with websockets.connect(
+            ws_url(),
+            additional_headers=auth_headers(),
+            open_timeout=25,
+        ) as ws:
             await ws.send(json.dumps({"query": run.query, "mode": run.mode, "query_id": run.query_id}))
 
             while True:
@@ -278,7 +290,7 @@ def send_decision(approval_id: str, decision: str) -> dict:
 
     url = f"{BRIDGE_URL}/api/v1/approve/{approval_id}"
     try:
-        response = httpx.post(url, params={"decision": decision}, timeout=10)
+        response = httpx.post(url, params={"decision": decision}, headers=auth_headers(), timeout=15)
         return response.json()
     except Exception as exc:  # noqa: BLE001
         return {"status": "unreachable", "detail": str(exc)}
@@ -288,7 +300,7 @@ def health() -> dict:
     import httpx
 
     try:
-        response = httpx.get(f"{BRIDGE_URL}/health", timeout=5)
+        response = httpx.get(f"{BRIDGE_URL}/health", headers=auth_headers(), timeout=15)
         return {"reachable": response.status_code == 200, **response.json()}
     except Exception as exc:  # noqa: BLE001
         return {"reachable": False, "detail": str(exc)}
