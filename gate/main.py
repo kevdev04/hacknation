@@ -13,6 +13,7 @@ restart and the audit trail is inspectable by hand.
 from __future__ import annotations
 
 import json
+import os
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -252,6 +253,7 @@ def health_full() -> dict:
         "agent": {
             "ok": bool(agent.get("reachable")),
             "url": bridge.BRIDGE_URL,
+            "mode": LAB_MODE,
             "detail": agent.get("schema_version") or agent.get("detail") or agent.get("status"),
         },
         "data": {
@@ -396,10 +398,19 @@ def get_structure(filename: str) -> FileResponse:
 
 _runs: dict[str, Any] = {}
 
+# Which lab answers the viewer's questions. One switch, on the gate: `live` is the real
+# orchestrator (bridge -> pivot-gateway -> Omnigent); `mock` is the bridge's simulator, for
+# rehearsing without agents. The viewer never picks, so no build ships pinned to the simulator.
+LAB_MODE = "mock" if os.environ.get("LAB_MODE", "live").strip().lower() == "mock" else "live"
+
+
+def _lab_mode(requested: str | None) -> str:
+    return requested if requested in ("live", "mock") else LAB_MODE
+
 
 class ExploreRequest(BaseModel):
     query: str
-    mode: Literal["live", "mock"] = "mock"
+    mode: Literal["live", "mock"] | None = None  # None = LAB_MODE
 
 
 def _accept_candidate(cand: dict) -> None:
@@ -428,7 +439,7 @@ def bridge_explore(request: ExploreRequest) -> dict:
 
     run = bridge.start_run(
         request.query,
-        request.mode,
+        _lab_mode(request.mode),
         CONFIG,
         on_candidate=_accept_candidate,
         on_update=lambda r: _runs.__setitem__(r.query_id, r),
@@ -452,7 +463,7 @@ def voice_health() -> dict:
 @app.post("/voice/ask")
 async def voice_ask(
     audio: UploadFile = File(...),
-    mode: str = Form("mock"),
+    mode: str = Form(""),  # empty = LAB_MODE
     explore: bool = Form(True),
 ) -> dict:
     """Transcribe a spoken question and, unless told otherwise, send it straight
@@ -476,7 +487,7 @@ async def voice_ask(
 
         run = bridge.start_run(
             query,
-            mode if mode in ("live", "mock") else "mock",
+            _lab_mode(mode),
             CONFIG,
             on_candidate=_accept_candidate,
             on_update=lambda r: _runs.__setitem__(r.query_id, r),

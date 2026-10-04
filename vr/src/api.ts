@@ -194,11 +194,12 @@ export function getBridgeRuns(): Promise<{ count: number; runs: BridgeRun[] }> {
   return json("/bridge/runs");
 }
 
-export function explore(query: string, mode: "live" | "mock" = "mock") {
+/** Ask the agent lab. The gate picks live vs simulator (LAB_MODE); pass `mode` only to override. */
+export function explore(query: string, mode?: "live" | "mock") {
   return json<{ ok: boolean; query_id: string }>("/bridge/explore", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ query, mode }),
+    body: JSON.stringify(mode ? { query, mode } : { query }),
   });
 }
 
@@ -217,7 +218,7 @@ export function getBridgeHealth(): Promise<BridgeHealth> {
 
 export interface FullHealth {
   web: { ok: boolean; detail: string };
-  agent: { ok: boolean; url: string; detail?: string | null };
+  agent: { ok: boolean; url: string; mode?: "live" | "mock"; detail?: string | null };
   data: {
     ok: boolean;
     structure: string | null;

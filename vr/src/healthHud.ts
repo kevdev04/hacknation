@@ -33,8 +33,11 @@ function render(root: HTMLElement, h: FullHealth): void {
     root,
     "agent",
     "gate → agent lab",
-    h.agent.ok ? "ok" : "down",
-    h.agent.ok ? `schema ${h.agent.detail ?? "?"}` : "unreachable · mock queue",
+    // Reachable but answering from the simulator is not a green light.
+    h.agent.ok ? (h.agent.mode === "mock" ? "unknown" : "ok") : "down",
+    h.agent.ok
+      ? `${h.agent.mode === "mock" ? "SIMULATOR (LAB_MODE=mock)" : "live"} · schema ${h.agent.detail ?? "?"}`
+      : "unreachable · mock queue",
   );
   paint(
     root,

@@ -256,7 +256,10 @@ async def stream_run(
             await ws.send(json.dumps({"query": run.query, "mode": run.mode, "query_id": run.query_id}))
 
             while True:
-                raw = await asyncio.wait_for(ws.recv(), timeout=120)
+                # The live lab can stay silent while an agent phase runs (up to the Gateway's phase
+                # timeout, and once more on a retry); the simulator never did. It always ends with
+                # done or error, so this is only a guard against a dead socket.
+                raw = await asyncio.wait_for(ws.recv(), timeout=float(os.environ.get("BRIDGE_EVENT_TIMEOUT_S", "420")))
                 event = json.loads(raw)
                 kind = event.get("event")
 

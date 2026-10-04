@@ -527,7 +527,7 @@ async function sendTranscript(): Promise<void> {
   voice.dispatching = true;
   repaint();
   try {
-    const { query_id } = await explore(query, "mock");
+    const { query_id } = await explore(query);
     log(`sent to lab: "${query}" → ${query_id}`.slice(0, 70));
     voice.lastText = "";
     voice.lastError = null;
