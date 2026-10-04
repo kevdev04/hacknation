@@ -215,6 +215,58 @@ def health() -> dict:
     }
 
 
+@app.get("/health/full")
+def health_full() -> dict:
+    """Every link the viewer depends on, one light each, for the HUD.
+
+    `web` is the viewer reaching this gate — if this answers, it is up.
+    `agent` is the gate reaching the agent lab bridge. `data` is what the gate
+    itself reads and writes: the structure every distance is measured on, and
+    the state directory that holds the audit trail. A short bridge timeout so a
+    dead lab does not stall the HUD."""
+    import time
+
+    import bridge
+    from structure import residue_letter
+
+    started = time.perf_counter()
+    agent = bridge.health(timeout=3)
+
+    pdb = DATA / CONFIG["pdb_file"]
+    triad = []
+    try:
+        triad = [residue_letter(str(pdb), CONFIG["chain"], pos) for pos in CONFIG["active_site_residues"]]
+        structure_ok = all(triad)
+    except Exception:  # noqa: BLE001
+        structure_ok = False
+    try:
+        STATE.mkdir(parents=True, exist_ok=True)
+        probe = STATE / ".probe"
+        probe.write_text(_now())
+        probe.unlink()
+        state_ok = True
+    except OSError:
+        state_ok = False
+
+    return {
+        "web": {"ok": True, "detail": "gate api answering"},
+        "agent": {
+            "ok": bool(agent.get("reachable")),
+            "url": bridge.BRIDGE_URL,
+            "detail": agent.get("schema_version") or agent.get("detail") or agent.get("status"),
+        },
+        "data": {
+            "ok": structure_ok and state_ok,
+            "structure": CONFIG["structure_id"] if structure_ok else None,
+            "triad": "".join(t or "?" for t in triad),
+            "state_writable": state_ok,
+            "candidates": len(load_candidates()),
+            "decisions": len(load_decisions()),
+        },
+        "checked_ms": round((time.perf_counter() - started) * 1000),
+    }
+
+
 @app.get("/config")
 def get_config() -> dict:
     return CONFIG

@@ -39,8 +39,53 @@ BRIDGE_URL = os.environ.get("BRIDGE_URL", "http://127.0.0.1:8010")
 BRIDGE_TOKEN = os.environ.get("BRIDGE_TOKEN", "").strip()
 
 
+_workspace = None
+
+
+def _sdk_headers() -> dict[str, str] | None:
+    """Ask the Databricks SDK for a fresh header, or None if it cannot.
+
+    The SDK caches the token and refreshes it when it expires, so calling this on
+    every request costs nothing and never goes stale.
+    """
+    global _workspace
+    try:
+        from databricks.sdk import WorkspaceClient
+    except ImportError:
+        return None
+    if _workspace is None:
+        profile = os.environ.get("DATABRICKS_CONFIG_PROFILE", "hack")
+        try:
+            _workspace = WorkspaceClient(profile=profile)
+        except Exception:  # noqa: BLE001 - no profile configured, fall back
+            return None
+    try:
+        return _workspace.config.authenticate()
+    except Exception:  # noqa: BLE001 - expired login, fall back
+        return None
+
+
 def auth_headers() -> dict[str, str]:
-    return {"Authorization": f"Bearer {BRIDGE_TOKEN}"} if BRIDGE_TOKEN else {}
+    """Authorization header, minted fresh on every call.
+
+    Databricks Apps reject personal access tokens and only accept OAuth user
+    tokens, which expire in about an hour. A fixed `BRIDGE_TOKEN` in `.env`
+    therefore stops working mid-demo — and because it was read once at import,
+    replacing it needed a process restart. Measured against the deployed app:
+    every health check turned into a 302 to OAuth an hour after the token was
+    issued, which looks exactly like the bridge being down.
+
+    So the SDK is asked first; it refreshes on its own. That needs
+    `databricks auth login --profile hack` on this machine, once.
+
+    `BRIDGE_TOKEN` still works as a manual override, and is read at call time so
+    a refreshed `.env` no longer needs a restart. Empty means no auth at all,
+    which is the case when the lab runs locally.
+    """
+    if headers := _sdk_headers():
+        return headers
+    token = os.environ.get("BRIDGE_TOKEN", "").strip() or BRIDGE_TOKEN
+    return {"Authorization": f"Bearer {token}"} if token else {}
 
 # Mutations as written in the literature: S121E, D186H, R280A.
 MUTATION_RE = re.compile(r"\b([ACDEFGHIKLMNPQRSTVWY])(\d{1,4})([ACDEFGHIKLMNPQRSTVWY])\b")
@@ -296,11 +341,11 @@ def send_decision(approval_id: str, decision: str) -> dict:
         return {"status": "unreachable", "detail": str(exc)}
 
 
-def health() -> dict:
+def health(timeout: float = 15) -> dict:
     import httpx
 
     try:
-        response = httpx.get(f"{BRIDGE_URL}/health", headers=auth_headers(), timeout=15)
+        response = httpx.get(f"{BRIDGE_URL}/health", headers=auth_headers(), timeout=timeout)
         return {"reachable": response.status_code == 200, **response.json()}
     except Exception as exc:  # noqa: BLE001
         return {"reachable": False, "detail": str(exc)}

@@ -59,6 +59,7 @@ import {
   type DecisionKind,
   type BridgeHealth,
   type BridgeRun,
+  type FullHealth,
   type GateConfig,
 } from "./api";
 import {
@@ -98,6 +99,7 @@ import { buildAgentPrompt, parseAnswer, promptSize } from "./prompt";
 import { ControlBar } from "./controlBar";
 import { mutateResidue } from "./rotamer";
 import { VoiceInput, voiceHealth } from "./voice";
+import { startHealthHud } from "./healthHud";
 import { XRInput } from "./input";
 import { disposeGroup, makeGrabBar, type CanvasPanel } from "./ui";
 
@@ -371,6 +373,17 @@ function links(): ProjectLink[] {
         : `${bridgeHealth?.bridge_url ?? "unknown"} — start it or set BRIDGE_URL`,
     },
     {
+      // The gate saying its own structure and audit trail are in one piece.
+      // Distinct from "Structure" below, which is what this viewer has parsed.
+      name: "Gate data",
+      ok: !!fullHealth?.data.ok,
+      detail: fullHealth?.data.ok
+        ? `${fullHealth.data.structure} triad ${fullHealth.data.triad} · audit trail writable`
+        : fullHealth
+          ? "structure or state directory unavailable on the gate"
+          : "not checked yet",
+    },
+    {
       name: "Structure",
       ok: !!currentStructure,
       detail: currentStructure
@@ -386,6 +399,15 @@ function links(): ProjectLink[] {
     },
   ];
 }
+
+/** Last /health/full, shared by the desktop HUD lights and the in-world links. */
+let fullHealth: FullHealth | null = null;
+startHealthHud((next) => {
+  if (next && fullHealth && next.data.ok !== fullHealth.data.ok) {
+    log(next.data.ok ? "gate data ok" : "gate data unavailable", next.data.ok ? "info" : "error");
+  }
+  fullHealth = next;
+});
 
 /** The residue under the ray, named for the console. */
 function pickedLabel(): string | null {

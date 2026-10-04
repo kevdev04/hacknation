@@ -216,6 +216,27 @@ export function getBridgeHealth(): Promise<BridgeHealth> {
   return json("/bridge/health");
 }
 
+// -------------------------------------------------------------- full health
+
+export interface FullHealth {
+  web: { ok: boolean; detail: string };
+  agent: { ok: boolean; url: string; detail?: string | null };
+  data: {
+    ok: boolean;
+    structure: string | null;
+    triad: string;
+    state_writable: boolean;
+    candidates: number;
+    decisions: number;
+  };
+  checked_ms: number;
+}
+
+/** Viewer → gate → agent lab, and the data the gate stands on, in one call. */
+export function getFullHealth(): Promise<FullHealth> {
+  return json("/health/full");
+}
+
 // --------------------------------------------------------------- experiments
 
 export interface SavedExperimentRecord {
